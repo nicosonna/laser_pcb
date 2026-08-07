@@ -32,11 +32,12 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 | 1 | Unités par module sur cartes réelles + géométries synthétiques | ✅ 2026-08-07 |
 | 2 | Intégration bout-en-bout ODB++ → axe médian → G-code → relecture | ✅ 2026-08-07 |
 | 3 | Runner unique `tests/run_all.py` + `.coveragerc` | ✅ 2026-08-07 |
-| 4 | Fiabilisation DRC (mapping feature→net) + tests de non-régression | à faire |
-| 5 | Tests GUI PySide6 (pytest-qt) après implémentation | à faire |
+| 4 | Projet .lpcb (round-trip embarqué) + Session GUI + smoke fenêtre headless | ✅ 2026-08-07 |
+| 5 | Fiabilisation DRC (mapping feature→net) + tests de non-régression | à faire |
+| 6 | Sender GRBL série + FakeGRBL (comme FakeMatek), streaming testé sans laser | à faire |
 | — | Vérifs de gravure sur Falcon 2 (procédure manuelle) | à faire |
 
-## Suite unités (`tests/unit/`) — 30 tests ✅ 2026-08-07
+## Suite unités (`tests/unit/`) — 32 tests ✅ 2026-08-07
 
 | Fichier | Tests | Code couvert | Points clés |
 |---|---|---|---|
@@ -45,24 +46,34 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 | `test_netlist.py` | 3 | `netlist` (eda/data) | ordre des calques, map top = 1047 entrées (GND dominant), calque inconnu → map vide (repli composantes) |
 | `test_toolpath.py` | 10 | `toolpath` | isolation offset (contour élargi), négatif = carte−cuivre, hachures, **Calibration** (bornes + monotonie + clamp), `is_subkerf`, **axe médian net-aware** (coupe entre nets ≠, jamais dans un même net), **DRC** (short réel détecté, nets séparés ignorés, aucun sans netlist) |
 | `test_gcode.py` | 6 | `gcode` | entête/pied GRBL (`G21/G90/M4 S0`…`M5/M2`), filtre parcours dégénérés, **F/S adaptatif par segment**, saut des mouvements nuls, `estimate_minutes`, `cut_length` |
+| `test_project.py` | 2 | `project` (.lpcb) | round-trip nom/kind/kerf/calques, **source embarquée** recréée à l'octet près (portabilité) |
 
-## Suite intégration (`tests/integration/`) — 2 tests ✅ 2026-08-07
+## Suite intégration (`tests/integration/`) — 6 tests ✅ 2026-08-07
 
 | Test | Vérifie |
 |---|---|
-| `test_full_pipeline_odb_to_gcode` | Chaîne complète sur la zone du QFN : ODB++ → `LabeledCopper` net-aware → `centerline_isolation` (>100 segments) → `build` G-code. Le G-code contient plusieurs vitesses F (adaptatif effectif), et la longueur gravée **relue depuis le texte** ≈ longueur calculée (les coupes sont bien émises). |
+| `test_full_pipeline_odb_to_gcode` | Chaîne complète sur la zone du QFN : ODB++ → `LabeledCopper` net-aware → `centerline_isolation` (>100 segments) → `build` G-code. Le G-code contient plusieurs vitesses F (adaptatif effectif), et la longueur gravée **relue depuis le texte** ≈ longueur calculée. |
 | `test_drc_runs_on_full_layer` | Le DRC tourne sur le vrai calque top et repère le contact **N$35/SW1** (corroboré visuellement sur la capture Fusion). |
+| `test_session_import_gerber` | `Session` importe un dossier Gerber : calques top+bottom, 77 trous, carte ≥ 80 mm. |
+| `test_session_import_odb_and_gcode` | `Session` importe l'ODB++ et génère un G-code GRBL valide (`M4`…`M2`). |
+| `test_session_project_roundtrip` | Save `.lpcb` → réouverture : réglages rechargés + géométrie **reconstruite depuis la source embarquée**. |
+| `test_mainwindow_import_and_layers` | Smoke GUI **headless** (Qt offscreen) : `MainWindow` s'instancie, importe un PCB, reconstruit le panneau calques, rend le canvas sans erreur. Sauté si PySide6 absent. |
 
 ## Couverture (mesure du 2026-08-07, `.coveragerc` appliqué)
 
 | Module | Couverture | Reste principalement |
 |---|---|---|
-| `gcode.py` | **98 %** | branches d'options rares |
+| `gcode.py` | **99 %** | branche d'option rare |
+| `canvas.py` | **94 %** | branches d'affichage |
+| `project.py` | **94 %** | erreurs I/O |
 | `netlist.py` | **91 %** | fichiers eda absents |
-| `geometry.py` | **86 %** | replis Excellon/robustesse (ArcPoly dégénéré, GeometryCollection) |
+| `geometry.py` | **89 %** | replis Excellon/robustesse |
 | `toolpath.py` | **86 %** | hachures obliques, `LayerJob` |
-| `odb.py` | **83 %** | `_read_features` hérité, branches de symbole exotiques |
-| **TOTAL** | **87 %** | |
+| `odb.py` | **83 %** | `_read_features` hérité, symboles exotiques |
+| `gui/session.py` | **81 %** | branches d'erreur d'import |
+| `gui/main_window.py` | 64 % | callbacks UI (dialogues) non exercés en headless |
+| `gui/app.py` | 0 % | point d'entrée (`exec()`) |
+| **TOTAL** | **83 %** | le cœur (géométrie→G-code) reste ≥ 83-99 % |
 
 ## Non testé automatiquement (à couvrir)
 

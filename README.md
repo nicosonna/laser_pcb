@@ -34,6 +34,17 @@ python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
 ```
 
+## Interface graphique
+
+```bash
+python -m laserpcb.gui.app
+```
+
+Importer un dossier PCB (Gerber ou ODB++) ou un ZIP Gerber, régler chaque calque
+(mode, passes, vitesse/puissance ou adaptatif), prévisualiser les parcours, puis
+**exporter le G-code** (fichier ou carte SD) ou **enregistrer le projet** `.lpcb`
+(source embarquée, rouvrable plus tard).
+
 ## Aperçus rapides
 
 ```bash
@@ -55,6 +66,8 @@ Règle : toute fonction ajoutée/modifiée a un test, couverture vérifiée à c
 ## Feuille de route
 
 - [x] `gcode.py` — G-code GRBL Falcon 2 avec `F`/`S` adaptatif par segment
-- [x] Suite de tests (unités + intégration, ~87 % de couverture)
-- [ ] GUI PySide6 — import, calques, réglages, aperçu, envoi série
+- [x] Suite de tests (unités + intégration, ~83 % de couverture)
+- [x] GUI PySide6 — import, calques, réglages, aperçu, export G-code (fichier/SD)
+- [x] Projets `.lpcb` — sauvegarde/réouverture avec source embarquée
+- [ ] Envoi série direct GRBL (streaming + FakeGRBL pour tests)
 - [ ] Optimisation perf de l'axe médian ; fiabilisation du mapping net pour le DRC
