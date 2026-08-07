@@ -76,6 +76,23 @@ def negative_region(copper: BaseGeometry, board: Polygon,
     return _as_multipolygon(region)
 
 
+def hole_circles(holes, scale_percent: float = -30.0, min_diameter: float = 0.15,
+                 quad_segs: int = 16) -> MultiLineString:
+    """Contours de perçage à graver, diamètre ajusté par un pourcentage.
+
+    Un gros trou gravé à son diamètre exact risque de couper une piste voisine ;
+    un pourcentage négatif le rétrécit (et réduit le temps de coupe). ``scale_percent``
+    = -30 → cercle à 70 % du Ø nominal (comportement de la v1).
+    """
+    from shapely.geometry import Point
+    lines = []
+    for h in holes:
+        d = max(h.diameter * (1 + scale_percent / 100.0), min_diameter)
+        ring = Point(h.x, h.y).buffer(d / 2.0, quad_segs=quad_segs).exterior
+        lines.append(LineString(ring.coords))
+    return MultiLineString(lines)
+
+
 def clearing_zones(region: BaseGeometry, copper: BaseGeometry,
                    margin: float) -> tuple[BaseGeometry, BaseGeometry]:
     """Découpe la zone à évider en un liseré près du cuivre et un intérieur ouvert.
@@ -166,12 +183,16 @@ class LayerJob:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Calibration:
-    """Réglages laser du Falcon 2, interpolés selon la clairance locale."""
-    kerf: float = 0.15
-    v_fast: float = 1500.0   # mm/min en zone large
-    v_slow: float = 300.0    # mm/min en zone serrée
+    """Réglages laser interpolés selon la clairance locale.
+
+    Défauts calés sur le **Creality Falcon 2 22 W** (spot ~0,08×0,1 mm, diode) :
+    point de départ raisonnable pour de la gravure PCB, à affiner sur plaque test.
+    """
+    kerf: float = 0.10       # spot focalisé du Falcon 2 22 W (~0,08–0,1 mm)
+    v_fast: float = 3000.0   # mm/min en zone large
+    v_slow: float = 600.0    # mm/min en zone serrée
     p_full: float = 100.0    # % en zone large
-    p_soft: float = 78.0     # % en zone serrée
+    p_soft: float = 60.0     # % en zone serrée
     c_open: float = 0.60     # clairance considérée "large" (mm)
 
     @property

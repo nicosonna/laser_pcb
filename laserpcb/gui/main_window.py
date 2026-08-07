@@ -7,8 +7,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QScrollArea, QSpinBox, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..project import (LayerConfig, MODE_CENTERLINE, MODE_ISOLATION, MODE_NEGATIVE)
@@ -88,10 +88,44 @@ class MainWindow(QMainWindow):
         vbox.addWidget(self.nav)
         vbox.addWidget(self.canvas)
         self.setCentralWidget(central)
+        self._build_toolbar()
         self._build_dock()
         self._build_send_dock()
         self._build_menu()
-        self.statusBar().showMessage("Importez un PCB (Gerber ou ODB++) pour commencer.")
+        self.statusBar().showMessage("Ouvrez un PCB (dossier, ZIP, TGZ) ou un projet .lpcb pour commencer.")
+
+    def _build_toolbar(self):
+        tb = QToolBar("Barre principale", self)
+        tb.setMovable(False)
+        self.addToolBar(tb)
+
+        # Bouton « Ouvrir » unifié (fichier / archive / dossier / projet)
+        open_btn = QToolButton()
+        open_btn.setText("📂 Ouvrir")
+        open_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        menu = QMenu(open_btn)
+        menu.addAction("Fichier ou archive (ZIP / TGZ / TAR)…", self.open_file)
+        menu.addAction("Dossier PCB (ODB++ / Gerber)…", self.import_folder)
+        menu.addAction("Projet .lpcb…", self.open_project)
+        open_btn.setMenu(menu)
+        open_btn.clicked.connect(self.open_file)   # clic direct = fichier/archive
+        tb.addWidget(open_btn)
+
+        tb.addSeparator()
+        tb.addWidget(QLabel(" Face : "))
+        self.side = QComboBox()
+        self.side.addItem("Top (dessus)", "top")
+        self.side.addItem("Bottom (dessous)", "bottom")
+        self.side.currentIndexChanged.connect(self._on_side)
+        tb.addWidget(self.side)
+        self.mirror = QCheckBox("Miroir (dessous)")
+        self.mirror.setChecked(True)
+        self.mirror.stateChanged.connect(self._on_mirror)
+        tb.addWidget(self.mirror)
+        tb.addSeparator()
+        self.burn_chk = QCheckBox("Aperçu brûlure (noir)")
+        self.burn_chk.stateChanged.connect(self._render)
+        tb.addWidget(self.burn_chk)
 
     # ---- construction UI ---------------------------------------------- #
     def _build_send_dock(self):
@@ -119,6 +153,51 @@ class MainWindow(QMainWindow):
         kf.addRow("Kerf (trait laser)", self.kerf)
         self._panel_layout.addWidget(kerf_box)
 
+        # --- Trous (réglages liés dynamiquement à la session courante) ---
+        p = self.session.project
+        holes_box = QGroupBox("Trous")
+        holes_box.setCheckable(True)
+        holes_box.setChecked(p.hole_enabled)
+        holes_box.toggled.connect(lambda on: setattr(self.session.project, "hole_enabled", on))
+        hf = QFormLayout(holes_box)
+        self.hole_pct = QDoubleSpinBox(); self.hole_pct.setRange(-90, 50)
+        self.hole_pct.setValue(p.hole_scale_percent); self.hole_pct.setSuffix(" %")
+        self.hole_pct.valueChanged.connect(lambda v: setattr(self.session.project, "hole_scale_percent", v))
+        self.hole_speed = QDoubleSpinBox(); self.hole_speed.setRange(1, 10000)
+        self.hole_speed.setValue(p.hole_speed); self.hole_speed.setSuffix(" mm/min")
+        self.hole_speed.valueChanged.connect(lambda v: setattr(self.session.project, "hole_speed", v))
+        self.hole_power = QDoubleSpinBox(); self.hole_power.setRange(0, 100)
+        self.hole_power.setValue(p.hole_power); self.hole_power.setSuffix(" %")
+        self.hole_power.valueChanged.connect(lambda v: setattr(self.session.project, "hole_power", v))
+        self.hole_passes = QSpinBox(); self.hole_passes.setRange(1, 20)
+        self.hole_passes.setValue(p.hole_passes)
+        self.hole_passes.valueChanged.connect(lambda v: setattr(self.session.project, "hole_passes", v))
+        hf.addRow("Taille (± % du Ø)", self.hole_pct)
+        hf.addRow("Vitesse", self.hole_speed)
+        hf.addRow("Puissance", self.hole_power)
+        hf.addRow("Passes", self.hole_passes)
+        self._holes_box = holes_box
+        self._panel_layout.addWidget(holes_box)
+
+        # --- Plateau / position ---
+        bed_box = QGroupBox("Plateau / Position")
+        bf = QFormLayout(bed_box)
+        self.bed_w = QDoubleSpinBox(); self.bed_w.setRange(10, 2000); self.bed_w.setValue(p.bed_width); self.bed_w.setSuffix(" mm")
+        self.bed_w.valueChanged.connect(lambda v: self._set_bed("bed_width", v))
+        self.bed_h = QDoubleSpinBox(); self.bed_h.setRange(10, 2000); self.bed_h.setValue(p.bed_height); self.bed_h.setSuffix(" mm")
+        self.bed_h.valueChanged.connect(lambda v: self._set_bed("bed_height", v))
+        self.org_x = QDoubleSpinBox(); self.org_x.setRange(-2000, 2000); self.org_x.setValue(p.origin[0]); self.org_x.setSuffix(" mm")
+        self.org_x.valueChanged.connect(self._on_origin)
+        self.org_y = QDoubleSpinBox(); self.org_y.setRange(-2000, 2000); self.org_y.setValue(p.origin[1]); self.org_y.setSuffix(" mm")
+        self.org_y.valueChanged.connect(self._on_origin)
+        self.btn_center = QPushButton("Centrer sur le plateau"); self.btn_center.clicked.connect(self._center)
+        bf.addRow("Largeur plateau", self.bed_w)
+        bf.addRow("Hauteur plateau", self.bed_h)
+        bf.addRow("Position X (PCB)", self.org_x)
+        bf.addRow("Position Y (PCB)", self.org_y)
+        bf.addRow(self.btn_center)
+        self._panel_layout.addWidget(bed_box)
+
         self._layers_container = QVBoxLayout()
         self._panel_layout.addLayout(self._layers_container)
         self._panel_layout.addStretch(1)
@@ -136,13 +215,12 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self):
         m = self.menuBar().addMenu("&Fichier")
-        m.addAction("Importer un dossier PCB…", self.import_folder)
-        m.addAction("Importer une archive (ZIP / TGZ / TAR)…", self.import_archive)
+        m.addAction("Ouvrir un fichier / archive…", self.open_file)
+        m.addAction("Ouvrir un dossier PCB…", self.import_folder)
+        m.addAction("Ouvrir un projet .lpcb…", self.open_project)
         m.addSeparator()
-        m.addAction("Ouvrir un projet…", self.open_project)
         m.addAction("Enregistrer le projet…", self.save_project)
-        m.addSeparator()
-        m.addAction("Exporter le G-code…", self.export_gcode)
+        m.addAction("Exporter le G-code (face active)…", self.export_gcode)
         m.addSeparator()
         m.addAction("Quitter", self.close)
 
@@ -160,26 +238,73 @@ class MainWindow(QMainWindow):
     def _on_kerf(self, v):
         self.session.project.kerf = v
 
+    def _active_roles(self):
+        return [self.session.active_side]
+
+    def _on_side(self, *_):
+        self.session.active_side = self.side.currentData()
+        self._render()
+
+    def _on_mirror(self, *_):
+        self.session.mirror_bottom = self.mirror.isChecked()
+        self._render()
+
+    def _set_bed(self, attr, v):
+        setattr(self.session.project, attr, v)
+        self._render()
+
+    def _on_origin(self, *_):
+        self.session.project.origin = (self.org_x.value(), self.org_y.value())
+        self._render()
+
+    def _center(self):
+        self.session.center_on_bed()
+        ox, oy = self.session.project.origin
+        for spin, val in ((self.org_x, ox), (self.org_y, oy)):
+            spin.blockSignals(True); spin.setValue(val); spin.blockSignals(False)
+        self._render()
+
+    def open_file(self):
+        """Ouvre un fichier : archive PCB (ZIP/TGZ/TAR) ou projet .lpcb (auto)."""
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Ouvrir un fichier",
+            filter="PCB & projets (*.zip *.tgz *.tar *.tar.gz *.tbz2 *.lpcb);;Tous (*)")
+        if not f:
+            return
+        if f.lower().endswith(".lpcb"):
+            self._open_project_path(f)
+        else:
+            self._import(f)
+
     def import_folder(self):
         d = QFileDialog.getExistingDirectory(self, "Dossier PCB (Gerber ou ODB++)")
         if d:
             self._import(d)
 
-    def import_archive(self):
-        f, _ = QFileDialog.getOpenFileName(
-            self, "Archive PCB",
-            filter="Archives PCB (*.zip *.tgz *.tar *.tar.gz *.tbz2);;Tous (*)")
-        if f:
-            self._import(f)
+    def _refresh_settings(self):
+        """Synchronise les widgets généraux avec la session courante."""
+        p = self.session.project
+        self.kerf.setValue(p.kerf)
+        self._holes_box.setChecked(p.hole_enabled)
+        self.hole_pct.setValue(p.hole_scale_percent)
+        self.hole_speed.setValue(p.hole_speed)
+        self.hole_power.setValue(p.hole_power)
+        self.hole_passes.setValue(p.hole_passes)
+        self.bed_w.setValue(p.bed_width)
+        self.bed_h.setValue(p.bed_height)
+        for spin, val in ((self.org_x, p.origin[0]), (self.org_y, p.origin[1])):
+            spin.blockSignals(True); spin.setValue(val); spin.blockSignals(False)
+        self.side.setCurrentIndex(0 if self.session.active_side == "top" else 1)
+        self.mirror.setChecked(self.session.mirror_bottom)
 
     def _import(self, path):
         try:
             self.session = Session()
             self.session.import_source(path)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "Import", f"Échec de l'import :\n{e}")
+            QMessageBox.critical(self, "Ouvrir", f"Échec de l'ouverture :\n{e}")
             return
-        self.kerf.setValue(self.session.project.kerf)
+        self._refresh_settings()
         self._rebuild_layers()
         self._render()
         self.statusBar().showMessage(
@@ -187,7 +312,17 @@ class MainWindow(QMainWindow):
             f"{len(self.session.holes)} trous.")
 
     def _render(self, *_):
-        self.canvas.render_session(self.session)
+        burn = self.burn_chk.isChecked()
+        items = None
+        if burn and self.session.layers:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                items = self.session.active_items()
+            finally:
+                QApplication.restoreOverrideCursor()
+        self.canvas.render_session(self.session, toolpath_items=items,
+                                   roles=self._active_roles(),
+                                   mirror=self.session.is_mirrored(), burn=burn)
 
     def preview_toolpaths(self):
         if not self.session.layers:
@@ -195,22 +330,24 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         self.statusBar().showMessage("Calcul des parcours… (peut prendre un moment)")
         try:
-            items = []
-            for layer in self.session.layers:
-                if layer.config.enabled:
-                    items.extend(self.session.layer_items(layer))
-            self.canvas.render_session(self.session, toolpath_items=items)
-            self.statusBar().showMessage(f"{len(items)} segments de parcours.")
+            items = self.session.active_items()   # cuivre + trous (face active)
+            self.canvas.render_session(self.session, toolpath_items=items,
+                                       roles=self._active_roles(),
+                                       mirror=self.session.is_mirrored())
+            self.statusBar().showMessage(
+                f"{self.session.active_side} — {len(items)} segments de parcours.")
         finally:
             QApplication.restoreOverrideCursor()
 
     def export_gcode(self):
         if not self.session.layers:
-            QMessageBox.information(self, "G-code", "Importez d'abord un PCB.")
+            QMessageBox.information(self, "G-code", "Ouvrez d'abord un PCB.")
             return
-        f, _ = QFileDialog.getSaveFileName(self, "Exporter le G-code (fichier ou carte SD)",
-                                           f"{self.session.project.name}.gcode",
-                                           filter="G-code (*.gcode *.nc)")
+        side = self.session.active_side
+        f, _ = QFileDialog.getSaveFileName(
+            self, f"Exporter le G-code — face {side} (fichier ou carte SD)",
+            f"{self.session.project.name}_{side}.gcode",
+            filter="G-code (*.gcode *.nc)")
         if not f:
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -219,7 +356,8 @@ class MainWindow(QMainWindow):
             Path(f).write_text(prog, encoding="utf-8")
         finally:
             QApplication.restoreOverrideCursor()
-        self.statusBar().showMessage(f"G-code écrit : {f} ({len(prog.splitlines())} lignes)")
+        self.statusBar().showMessage(
+            f"G-code face {side} écrit : {f} ({len(prog.splitlines())} lignes)")
 
     def save_project(self):
         if not self.session.layers:
@@ -233,14 +371,16 @@ class MainWindow(QMainWindow):
 
     def open_project(self):
         f, _ = QFileDialog.getOpenFileName(self, "Ouvrir un projet", filter="Projet (*.lpcb)")
-        if not f:
-            return
+        if f:
+            self._open_project_path(f)
+
+    def _open_project_path(self, f):
         try:
             self.session = Session.open_project(f)
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Projet", f"Échec de l'ouverture :\n{e}")
             return
-        self.kerf.setValue(self.session.project.kerf)
+        self._refresh_settings()
         self._rebuild_layers()
         self._render()
         self.statusBar().showMessage(f"Projet ouvert : {Path(f).name}")

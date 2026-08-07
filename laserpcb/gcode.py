@@ -65,11 +65,24 @@ def items_from_segments(segments: list[Segment], calib: Calibration,
 # --------------------------------------------------------------------------- #
 # Optimisation de l'ordre (plus proche voisin, vectorisé)
 # --------------------------------------------------------------------------- #
-def optimize(items):
-    """Réordonne et retourne éventuellement les parcours pour minimiser les trajets."""
+def optimize(items, max_nn: int = 20000, band: float = 2.0):
+    """Réordonne les parcours pour réduire les trajets à vide.
+
+    - Petit nombre de parcours : plus-proche-voisin (avec inversion) — quasi optimal.
+    - Grand nombre : tri **boustrophédon** (serpentin par bandes horizontales,
+      direction alternée) en O(n log n) — bien plus rapide que le PPV O(n²) et déjà
+      très efficace pour réduire les déplacements sur une carte complète.
+    """
     n = len(items)
     if n <= 1:
         return items
+    if n > max_nn:
+        return _boustrophedon(items, band)
+    return _greedy_nearest(items)
+
+
+def _greedy_nearest(items):
+    n = len(items)
     starts = np.array([it[0][0] for it in items], dtype=float)
     ends = np.array([it[0][-1] for it in items], dtype=float)
     remaining = np.ones(n, dtype=bool)
@@ -80,13 +93,22 @@ def optimize(items):
         de = np.where(remaining, ((ends - cur) ** 2).sum(1), np.inf)
         i_s = int(ds.argmin()); i_e = int(de.argmin())
         if de[i_e] < ds[i_s]:
-            idx = i_e; coords = items[idx][0][::-1]  # on parcourt à l'envers
+            idx = i_e; coords = items[idx][0][::-1]   # on parcourt à l'envers
         else:
             idx = i_s; coords = items[idx][0]
         remaining[idx] = False
         order.append((coords, items[idx][1], items[idx][2]))
         cur = np.array(coords[-1])
     return order
+
+
+def _boustrophedon(items, band: float):
+    """Serpentin : bandes en Y, alternant le sens en X à chaque bande."""
+    def key(item):
+        x, y = item[0][0]
+        b = int(y // band)
+        return (b, x if b % 2 == 0 else -x)
+    return sorted(items, key=key)
 
 
 # --------------------------------------------------------------------------- #
@@ -135,15 +157,15 @@ def build(items, config: GCodeConfig | None = None, passes: int = 1,
           title: str = "laserpcb job") -> str:
     """Construit le programme G-code complet à partir d'items (coords, feed, power)."""
     config = config or GCodeConfig()
-    if config.optimize_order and len(items) <= config.max_optimize:
-        items = optimize(items)
+    if config.optimize_order:
+        items = optimize(items, config.max_optimize)
 
     em = _Emitter(config)
     em.lines += [
         f"; {title}",
         "; Genere par laserpcb pour Creality Falcon 2 (GRBL)",
-        "; Prerequis machine : mode laser actif -> $32=1",
         "G21", "G90", "G94",              # mm, absolu, vitesse en unites/min
+        "$32=1",                          # force le mode laser (securite : tir pendant les G1 seulement)
         f"{config.laser_mode} S0",        # arme le laser, eteint
     ]
     for p in range(passes):

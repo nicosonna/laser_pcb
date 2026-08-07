@@ -224,5 +224,28 @@ class GrblSender:
     def unlock(self) -> str:
         return self.send_line("$X")
 
+    # ---- origine de travail (absolu) --------------------------------------- #
+    def set_work_zero(self) -> str:
+        """Définit la position actuelle comme origine de travail (0,0)."""
+        return self.send_line("G10 L20 P1 X0 Y0")
+
+    def goto_zero(self) -> str:
+        """Retour à l'origine de travail en absolu."""
+        return self.send_line("G90 G0 X0 Y0")
+
+    def laser_on(self, percent: float = 1.0, max_s: int = 1000) -> str:
+        """Allume le laser à faible puissance, à l'arrêt, pour repérer la position.
+
+        On désactive le mode laser ($32=0) pour un point fixe (sinon GRBL ne tire
+        que pendant les déplacements). ``laser_off`` restaure le mode laser.
+        """
+        s = int(round(max(0.0, min(percent, 100.0)) / 100.0 * max_s))
+        self.send_line("$32=0")
+        return self.send_line(f"M3 S{s}")
+
+    def laser_off(self) -> str:
+        self.send_line("M5")
+        return self.send_line("$32=1")
+
     def close(self) -> None:
         self.t.close()

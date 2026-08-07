@@ -69,3 +69,19 @@ def test_jog_and_home():
     s.home()
     assert any(l.startswith("$J=G91") for l in fake.received)
     assert "$H" in fake.received
+
+
+def test_origin_and_pointer():
+    """Outils d'origine : définir 0,0, y aller, pointeur laser (mode laser OFF)."""
+    fake = FakeGrbl()
+    s = GrblSender(fake)
+    s.connect()
+    s.set_work_zero()
+    s.goto_zero()
+    s.laser_on(1.0)
+    s.laser_off()
+    assert "G10 L20 P1 X0 Y0" in fake.received
+    assert "G90 G0 X0 Y0" in fake.received
+    assert any(l.startswith("M3 S") for l in fake.received)   # pointeur allumé
+    assert "$32=0" in fake.received and "$32=1" in fake.received  # mode laser off/on
+    assert "M5" in fake.received

@@ -35,6 +35,16 @@ def test_hatch_fills_region():
         assert ln.length <= 5.001
 
 
+def test_hole_circles_scaled():
+    """Le pourcentage rétrécit le Ø du trou gravé (ex. -30 % -> 70 %)."""
+    from laserpcb.geometry import Hole
+    from shapely.geometry import Polygon
+    rings = tp.hole_circles([Hole(0, 0, 2.0)], scale_percent=-30.0)
+    ring = list(rings.geoms)[0]
+    # Ø 2 mm * 0.7 = 1.4 -> rayon 0.7
+    assert abs(Polygon(ring).area - 3.14159 * 0.7 ** 2) < 0.05
+
+
 def test_clearing_zones_edge_vs_interior():
     """Évidement : liseré près du cuivre + intérieur ouvert, couvrant toute la zone."""
     region = box(0, 0, 10, 10)

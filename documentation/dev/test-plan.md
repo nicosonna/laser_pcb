@@ -35,9 +35,16 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 | 4 | Projet .lpcb (round-trip embarqué) + Session GUI + smoke fenêtre headless | ✅ 2026-08-07 |
 | 5 | Sender GRBL série + FakeGRBL (comme FakeMatek), streaming testé sans laser | ✅ 2026-08-07 |
 | 6 | DRC conscient des composants (footprint vs vrai court) + perf axe médian | ✅ 2026-08-07 |
+| 7 | GUI complète : par-face + miroir, trous (% Ø), plateau/origine absolue, aperçu brûlure, import TGZ, zoom, défauts Falcon 2 22 W | ✅ 2026-08-07 |
+| 8 | E2E `scripts/e2e_test.py` (laser mocké, toutes faces×modes, streaming) + optim trajets (serpentin, −85 %) | ✅ 2026-08-07 |
 | — | Vérifs de gravure sur Falcon 2 (procédure manuelle) | à faire |
 
-## Suite unités (`tests/unit/`) — 40 tests ✅ 2026-08-07
+> Un round **end-to-end** manuel/CI complémentaire : `python scripts/e2e_test.py`
+> importe un projet, génère le G-code de chaque face × chaque mode, vérifie coords
+> finies et dans le plateau, DRC, aperçu brûlure, puis **streame vers un FakeGRBL**
+> (origine, pointeur, gravure). Validé sur le vrai `solar_pi.tar`.
+
+## Suite unités (`tests/unit/`) — 43 tests ✅ 2026-08-07
 
 | Fichier | Tests | Code couvert | Points clés |
 |---|---|---|---|
@@ -49,11 +56,12 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 | `test_project.py` | 2 | `project` (.lpcb) | round-trip nom/kind/kerf/calques, **source embarquée** recréée à l'octet près (portabilité) |
 | `test_sender.py` | 6 | `sender` (GRBL) | contre **FakeGRBL** : nettoyage commentaires, streaming complet + progression, `error:` → exception, `should_stop` → soft-reset, statut/temps réel (`?`/`!`/`~`/reset), jog/home |
 
-## Suite intégration (`tests/integration/`) — 10 tests ✅ 2026-08-07
+## Suite intégration (`tests/integration/`) — 13 tests ✅ 2026-08-07
 
-> Inclut aussi : import **ODB++ .tgz** (`test_session_import_tgz`) et **évidement
-> adaptatif** du mode négatif — vitesses distinctes bord/intérieur
-> (`test_negative_adaptive_clearing_two_speeds`).
+> Inclut aussi : import **ODB++ .tgz**, **évidement adaptatif** (vitesses bord/
+> intérieur), **centrage plateau** décalant le G-code (`test_center_on_bed_offsets_gcode`),
+> **export par face** distinct + miroir (`test_per_side_export_differs_and_mirrors`),
+> et **trous** ajoutés au G-code (`test_holes_add_lines_to_gcode`).
 
 | Test | Vérifie |
 |---|---|

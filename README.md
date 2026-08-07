@@ -75,4 +75,8 @@ Règle : toute fonction ajoutée/modifiée a un test, couverture vérifiée à c
 - [x] Envoi série direct GRBL — streaming + jog/home/pause + FakeGRBL pour tests
 - [x] Optimisation perf de l'axe médian (clip groupé : ~96 s → ~5 s, ~18×)
 - [x] DRC conscient des composants (footprint vs vrai court inter-composants)
+- [x] GUI complète : gravure **par face** + miroir, **trous** (% du Ø), **plateau +
+      origine absolue** (pointeur laser, définir 0,0), **aperçu brûlure**, import TGZ, zoom
+- [x] Défauts calés **Creality Falcon 2 22 W** (plateau 400×415, kerf 0,1 mm)
+- [x] Optimisation trajets à vide (ordre serpentin : −85 % sur gros jobs)
 - [ ] Vérifications de gravure réelle sur le Falcon 2 (calibration kerf/puissance)

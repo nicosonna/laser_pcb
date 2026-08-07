@@ -63,6 +63,47 @@ def test_negative_adaptive_clearing_two_speeds():
     assert len(feeds) >= 2                    # au moins deux vitesses (bord / intérieur)
 
 
+def _iso(session):
+    for layer in session.layers:
+        layer.config.mode = MODE_ISOLATION
+
+
+def test_center_on_bed_offsets_gcode():
+    """Centrer sur le plateau décale le G-code (travail en absolu)."""
+    import re
+    s = Session()
+    s.import_source(ODBPP)
+    _iso(s)
+    s.center_on_bed()
+    ox, oy = s.project.origin
+    assert ox > 0 and oy > 0
+    g = s.generate_gcode()
+    xs = [float(v) for v in re.findall(r"G1 X(-?[\d.]+)", g)]
+    assert min(xs) >= ox - 1                 # tous les traits décalés sur le plateau
+
+
+def test_per_side_export_differs_and_mirrors():
+    s = Session()
+    s.import_source(ODBPP)
+    _iso(s)
+    s.mirror_bottom = True
+    s.active_side = "top"; top = s.generate_gcode()
+    s.active_side = "bottom"; bot = s.generate_gcode()
+    assert top != bot                        # une face à la fois, contenu distinct
+    assert "_top" in top and "_bottom" in bot
+
+
+def test_holes_add_lines_to_gcode():
+    s = Session()
+    s.import_source(ODBPP)
+    _iso(s)
+    s.project.hole_enabled = True
+    with_holes = len(s.generate_gcode().splitlines())
+    s.project.hole_enabled = False
+    without = len(s.generate_gcode().splitlines())
+    assert with_holes > without
+
+
 def test_session_project_roundtrip(tmp_path):
     s = Session()
     s.import_source(GERBER)

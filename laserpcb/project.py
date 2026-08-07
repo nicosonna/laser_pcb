@@ -43,9 +43,17 @@ class Project:
     source_kind: str = "gerber"    # "gerber" | "odbpp"
     source_files: dict[str, str] = field(default_factory=dict)  # relpath -> base64
     layers: list[LayerConfig] = field(default_factory=list)
-    kerf: float = 0.15
-    origin: tuple[float, float] = (0.0, 0.0)
+    kerf: float = 0.10                         # spot Falcon 2 22 W (~0,08–0,1 mm)
+    origin: tuple[float, float] = (0.0, 0.0)   # position du PCB sur le plateau (mm)
+    bed_width: float = 400.0                   # plateau Falcon 2 : 400 × 415 mm
+    bed_height: float = 415.0
     calibration: dict = field(default_factory=dict)
+    # Perçages (gravés en contour, une face à la fois)
+    hole_enabled: bool = True
+    hole_scale_percent: float = -30.0   # <0 rétrécit (évite de couper une piste)
+    hole_speed: float = 600.0
+    hole_power: float = 100.0
+    hole_passes: int = 1
     schema: int = SCHEMA
 
     # ---- source embarquée --------------------------------------------------- #
@@ -81,9 +89,16 @@ class Project:
             source_kind=d.get("source_kind", "gerber"),
             source_files=d.get("source_files", {}),
             layers=layers,
-            kerf=d.get("kerf", 0.15),
+            kerf=d.get("kerf", 0.10),
             origin=tuple(d.get("origin", (0.0, 0.0))),
+            bed_width=d.get("bed_width", 400.0),
+            bed_height=d.get("bed_height", 415.0),
             calibration=d.get("calibration", {}),
+            hole_enabled=d.get("hole_enabled", True),
+            hole_scale_percent=d.get("hole_scale_percent", -30.0),
+            hole_speed=d.get("hole_speed", 600.0),
+            hole_power=d.get("hole_power", 100.0),
+            hole_passes=d.get("hole_passes", 1),
             schema=d.get("schema", SCHEMA),
         )
 

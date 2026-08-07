@@ -53,3 +53,16 @@ def test_estimate_minutes():
 def test_cut_length():
     items = gc.items_from_paths([LineString([(0, 0), (3, 4)])], speed=600, power=100)
     assert math.isclose(gc.cut_length(items), 5.0, rel_tol=1e-6)
+
+
+def test_boustrophedon_orders_into_bands():
+    """Le serpentin ordonne les parcours en bandes Y croissantes (trajets réduits)."""
+    # ordre initial volontairement dispersé (par colonnes)
+    items = [([(x, y), (x + 0.5, y)], 600, 100)
+             for x in range(20) for y in range(20)]
+    ordered = gc.optimize(items, max_nn=0, band=2.0)   # force le mode serpentin
+    bands = [int(it[0][0][1] // 2.0) for it in ordered]
+    assert bands == sorted(bands)                       # bandes non décroissantes
+    # au sein d'une bande, le sens X alterne (serpentin) : bande 0 croissante
+    band0_x = [it[0][0][0] for it in ordered if int(it[0][0][1] // 2.0) == 0]
+    assert band0_x == sorted(band0_x)

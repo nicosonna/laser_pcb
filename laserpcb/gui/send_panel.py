@@ -90,6 +90,20 @@ class SendPanel(QWidget):
         g.addWidget(self.btn_unlock, 2, 3, 1, 2)
         root.addWidget(jog)
 
+        # --- origine de travail (0,0) ---
+        org = QGroupBox("Origine (0,0) — travail en absolu")
+        og = QGridLayout(org)
+        self.pointer_pct = QDoubleSpinBox(); self.pointer_pct.setRange(0.1, 20)
+        self.pointer_pct.setValue(1.0); self.pointer_pct.setSuffix(" %")
+        self.btn_pointer = QPushButton("Pointeur laser"); self.btn_pointer.setCheckable(True)
+        self.btn_pointer.toggled.connect(self._toggle_pointer)
+        self.btn_setzero = QPushButton("Définir 0,0 ici"); self.btn_setzero.clicked.connect(self._set_zero)
+        self.btn_gotozero = QPushButton("Aller à 0,0"); self.btn_gotozero.clicked.connect(self._goto_zero)
+        og.addWidget(QLabel("Puissance pointeur"), 0, 0); og.addWidget(self.pointer_pct, 0, 1)
+        og.addWidget(self.btn_pointer, 0, 2)
+        og.addWidget(self.btn_setzero, 1, 0, 1, 2); og.addWidget(self.btn_gotozero, 1, 2)
+        root.addWidget(org)
+
         # --- gravure ---
         run = QGroupBox("Gravure")
         rl = QVBoxLayout(run)
@@ -113,13 +127,15 @@ class SendPanel(QWidget):
     def _set_connected(self, on: bool):
         self.btn_connect.setText("Déconnecter" if on else "Connecter")
         for b in (self.btn_yp, self.btn_ym, self.btn_xp, self.btn_xm,
-                  self.btn_home, self.btn_unlock, self.btn_send):
+                  self.btn_home, self.btn_unlock, self.btn_send,
+                  self.btn_pointer, self.btn_setzero, self.btn_gotozero):
             b.setEnabled(on)
         self.ports.setEnabled(not on); self.baud.setEnabled(not on)
 
     def _set_streaming(self, on: bool):
         for b in (self.btn_yp, self.btn_ym, self.btn_xp, self.btn_xm,
-                  self.btn_home, self.btn_unlock, self.btn_send, self.btn_connect):
+                  self.btn_home, self.btn_unlock, self.btn_send, self.btn_connect,
+                  self.btn_pointer, self.btn_setzero, self.btn_gotozero):
             b.setEnabled(not on and (self.sender is not None or b is self.btn_connect))
         for b in (self.btn_pause, self.btn_resume, self.btn_stop):
             b.setEnabled(on)
@@ -172,6 +188,27 @@ class SendPanel(QWidget):
     def _unlock(self):
         if self.sender:
             self.sender.unlock()
+
+    # ---- origine de travail ------------------------------------------------ #
+    def _toggle_pointer(self, on):
+        if not self.sender:
+            return
+        if on:
+            self.sender.laser_on(self.pointer_pct.value())
+            self.status.setText(f"Pointeur ON ({self.pointer_pct.value():.0f} %) — repère la position")
+        else:
+            self.sender.laser_off()
+            self.status.setText("Pointeur OFF")
+
+    def _set_zero(self):
+        if self.sender:
+            self.sender.set_work_zero()
+            self.status.setText("Origine 0,0 définie à la position actuelle")
+
+    def _goto_zero(self):
+        if self.sender:
+            self.sender.goto_zero()
+            self.status.setText("Retour à 0,0")
 
     # ---- streaming --------------------------------------------------------- #
     def start_stream(self):

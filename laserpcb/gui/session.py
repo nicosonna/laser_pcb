@@ -35,6 +35,8 @@ class Session:
     holes: list[Hole] = field(default_factory=list)
     layers: list[LoadedLayer] = field(default_factory=list)
     source_root: Path | None = None
+    active_side: str = "top"          # "top" | "bottom" : face vue et exportée
+    mirror_bottom: bool = True        # miroir du bottom (plaque retournée)
     _workdir: Path | None = None
 
     # ------------------------------------------------------------------ #
@@ -131,14 +133,59 @@ class Session:
             return gc.items_from_paths(hatch, cfg.speed, cfg.power)
         return []
 
-    def generate_gcode(self, config: gc.GCodeConfig | None = None) -> str:
+    def active_layers(self) -> list[LoadedLayer]:
+        """Calques de la face active uniquement (on grave une face à la fois)."""
+        return [l for l in self.layers if l.config.role == self.active_side]
+
+    def board_center_x(self) -> float:
+        minx, _miny, maxx, _maxy = self.board.bounds
+        return (minx + maxx) / 2.0
+
+    def is_mirrored(self) -> bool:
+        return self.active_side == "bottom" and self.mirror_bottom
+
+    def active_items(self) -> list:
+        """Items G-code de la face active (cuivre + trous), NON miroités."""
         items = []
-        for layer in self.layers:
+        for layer in self.active_layers():
             if layer.config.enabled:
                 pcs = self.layer_items(layer)
                 for _ in range(max(1, layer.config.passes)):
                     items.extend(pcs)
-        return gc.build(items, config or gc.GCodeConfig(), title=self.project.name)
+        p = self.project
+        if p.hole_enabled and self.holes:
+            rings = tp.hole_circles(self.holes, p.hole_scale_percent)
+            hole_items = gc.items_from_paths(rings, p.hole_speed, p.hole_power)
+            for _ in range(max(1, p.hole_passes)):
+                items.extend(hole_items)
+        return items
+
+    def generate_gcode(self, config: gc.GCodeConfig | None = None) -> str:
+        """G-code absolu de la **face active** : miroir (bottom) puis offset plateau.
+
+        Le G-code est en G90 (absolu) depuis l'origine de travail réglée sur la
+        machine ; ``project.origin`` positionne le PCB sur le plateau.
+        """
+        items = self.active_items()
+        if self.is_mirrored() and self.board is not None:
+            cx = self.board_center_x()
+            items = [([(2 * cx - x, y) for (x, y) in coords], f, pw)
+                     for coords, f, pw in items]
+        ox, oy = self.project.origin
+        if ox or oy:
+            items = [([(x + ox, y + oy) for (x, y) in coords], f, pw)
+                     for coords, f, pw in items]
+        title = f"{self.project.name}_{self.active_side}"
+        return gc.build(items, config or gc.GCodeConfig(), title=title)
+
+    def center_on_bed(self) -> None:
+        """Positionne le PCB au centre du plateau (règle ``project.origin``)."""
+        if self.board is None:
+            return
+        minx, miny, maxx, maxy = self.board.bounds
+        w, h = maxx - minx, maxy - miny
+        self.project.origin = ((self.project.bed_width - w) / 2 - minx,
+                               (self.project.bed_height - h) / 2 - miny)
 
     # ------------------------------------------------------------------ #
     # Projet
