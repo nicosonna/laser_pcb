@@ -38,6 +38,7 @@ class Session:
     active_side: str = "top"          # "top" | "bottom" : face vue et exportée
     mirror_bottom: bool = True        # miroir du bottom (plaque retournée)
     _workdir: Path | None = None
+    _expand_cache: dict = field(default_factory=dict)  # cache cuivre élargi
 
     # ------------------------------------------------------------------ #
     # Détection / import de source
@@ -102,13 +103,16 @@ class Session:
         return c
 
     def _expanded(self, layer: LoadedLayer) -> LabeledCopper:
-        """Cuivre élargi de la marge (compensation laser + perchlorure), par net."""
+        """Cuivre élargi de la marge (compensation laser + perchlorure), **plafonné
+        par net** : jamais de pont entre deux nets, quelle que soit la marge."""
         margin = self.project.copper_margin
-        base = layer.labeled
         if margin <= 0:
-            return base
-        exp = {n: g.buffer(margin) for n, g in base.net_geoms.items()}
-        return LabeledCopper(base.layer, exp, base.board, base.has_nets)
+            return layer.labeled
+        key = (id(layer), round(margin, 4), round(self.project.kerf, 4))
+        if key not in self._expand_cache:
+            self._expand_cache[key] = tp.expand_copper(
+                layer.labeled, margin, min_gap=self.project.kerf)
+        return self._expand_cache[key]
 
     def layer_items(self, layer: LoadedLayer):
         """Renvoie les items G-code (coords, feed, power) d'un calque selon son mode.

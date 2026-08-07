@@ -272,6 +272,36 @@ def centerline_isolation(labeled: LabeledCopper, kerf: float = 0.15,
             for line, c in zip(lines, clr)]
 
 
+def expand_copper(labeled: LabeledCopper, margin: float,
+                  min_gap: float) -> LabeledCopper:
+    """Élargit chaque net de ``margin`` **sans jamais ponter un autre net**.
+
+    Chaque net grandit dans l'espace libre, mais reste à ≥ ``min_gap`` (le kerf) de
+    tout autre net → aucun pont, quelle que soit la marge (le fine-pitch est
+    automatiquement limité). Un net ne devient jamais plus petit que l'original.
+    """
+    from shapely import STRtree
+
+    if margin <= 0:
+        return labeled
+    names = list(labeled.net_geoms)
+    geoms = [labeled.net_geoms[n] for n in names]
+    tree = STRtree(geoms)
+    out: dict = {}
+    for i, (name, gi) in enumerate(zip(names, geoms)):
+        near = [geoms[int(j)] for j in tree.query(gi.buffer(margin + min_gap))
+                if int(j) != i]
+        grown = gi.buffer(margin)
+        if near:
+            # On reste (margin+min_gap) du cuivre d'origine des autres nets : comme
+            # eux s'élargissent aussi de `margin`, il reste toujours >= min_gap entre
+            # les deux cuivres ÉLARGIS -> aucun pont (symétrique).
+            forbidden = unary_union(near).buffer(margin + min_gap)
+            grown = grown.difference(forbidden)
+        out[name] = gi.union(grown)                         # jamais plus petit que l'origine
+    return LabeledCopper(labeled.layer, out, labeled.board, labeled.has_nets)
+
+
 def hybrid_isolation(expanded: LabeledCopper, original: LabeledCopper,
                      kerf: float = 0.10, tight_factor: float = 3.0, step: float = 0.08):
     """Isolation hybride : contours offset propres + **passe unique centrée** (axe
