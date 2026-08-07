@@ -61,6 +61,12 @@ class Project:
     hole_speed: float = 600.0
     hole_power: float = 100.0
     hole_passes: int = 1
+    # Découpe du contour de carte (FR4) — optionnelle. Là on coupe le cuivre+FR4 :
+    # pleine puissance, basse vitesse, beaucoup de passes.
+    cut_outline_enabled: bool = False
+    cut_outline_speed: float = 300.0     # mm/min (basse vitesse)
+    cut_outline_power: float = 100.0     # %
+    cut_outline_passes: int = 30
     schema: int = SCHEMA
 
     # ---- source embarquée --------------------------------------------------- #
@@ -107,6 +113,10 @@ class Project:
             hole_speed=d.get("hole_speed", 600.0),
             hole_power=d.get("hole_power", 100.0),
             hole_passes=d.get("hole_passes", 1),
+            cut_outline_enabled=d.get("cut_outline_enabled", False),
+            cut_outline_speed=d.get("cut_outline_speed", 300.0),
+            cut_outline_power=d.get("cut_outline_power", 100.0),
+            cut_outline_passes=d.get("cut_outline_passes", 30),
             schema=d.get("schema", SCHEMA),
         )
 

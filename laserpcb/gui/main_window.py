@@ -184,6 +184,27 @@ class MainWindow(QMainWindow):
         self._holes_box = holes_box
         self._panel_layout.addWidget(holes_box)
 
+        # --- Découpe du contour (FR4), optionnelle ---
+        cut_box = QGroupBox("Découpe contour (FR4)")
+        cut_box.setCheckable(True)
+        cut_box.setChecked(p.cut_outline_enabled)
+        cut_box.toggled.connect(lambda on: self._set_proj("cut_outline_enabled", on))
+        cf = QFormLayout(cut_box)
+        self.cut_speed = QDoubleSpinBox(); self.cut_speed.setRange(1, 10000)
+        self.cut_speed.setValue(p.cut_outline_speed); self.cut_speed.setSuffix(" mm/min")
+        self.cut_speed.valueChanged.connect(lambda v: self._set_proj("cut_outline_speed", v))
+        self.cut_power = QDoubleSpinBox(); self.cut_power.setRange(0, 100)
+        self.cut_power.setValue(p.cut_outline_power); self.cut_power.setSuffix(" %")
+        self.cut_power.valueChanged.connect(lambda v: self._set_proj("cut_outline_power", v))
+        self.cut_passes = QSpinBox(); self.cut_passes.setRange(1, 100)
+        self.cut_passes.setValue(p.cut_outline_passes)
+        self.cut_passes.valueChanged.connect(lambda v: self._set_proj("cut_outline_passes", v))
+        cf.addRow("Vitesse", self.cut_speed)
+        cf.addRow("Puissance", self.cut_power)
+        cf.addRow("Passes", self.cut_passes)
+        self._cut_box = cut_box
+        self._panel_layout.addWidget(cut_box)
+
         # --- Plateau / position ---
         bed_box = QGroupBox("Plateau / Position")
         bf = QFormLayout(bed_box)
@@ -252,6 +273,10 @@ class MainWindow(QMainWindow):
         setattr(self.session.project, attr, v)
         self._invalidate_toolpaths()       # les trous font partie des parcours
 
+    def _set_proj(self, attr, v):
+        setattr(self.session.project, attr, v)
+        self._invalidate_toolpaths()
+
     def _active_roles(self):
         return [self.session.active_side]
 
@@ -305,10 +330,13 @@ class MainWindow(QMainWindow):
             (self.hole_speed, p.hole_speed), (self.hole_power, p.hole_power),
             (self.hole_passes, p.hole_passes), (self.bed_w, p.bed_width),
             (self.bed_h, p.bed_height), (self.org_x, p.origin[0]), (self.org_y, p.origin[1]),
+            (self.cut_speed, p.cut_outline_speed), (self.cut_power, p.cut_outline_power),
+            (self.cut_passes, p.cut_outline_passes),
         ]
         for widget, val in pairs:
             widget.blockSignals(True); widget.setValue(val); widget.blockSignals(False)
         for widget, state in ((self._holes_box, p.hole_enabled),
+                              (self._cut_box, p.cut_outline_enabled),
                               (self.mirror, self.session.mirror_bottom)):
             widget.blockSignals(True); widget.setChecked(state); widget.blockSignals(False)
         self.side.blockSignals(True)

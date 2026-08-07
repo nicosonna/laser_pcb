@@ -195,6 +195,13 @@ class Session:
             hole_items = gc.items_from_paths(rings, p.hole_speed, p.hole_power)
             for _ in range(max(1, p.hole_passes)):
                 items.extend(hole_items)
+        # Découpe du contour de carte (FR4), optionnelle : pleine puissance, N passes
+        if p.cut_outline_enabled and self.board is not None and not self.board.is_empty:
+            from shapely.geometry import LineString
+            lines = [LineString(self.board.exterior.coords)]
+            lines += [LineString(r.coords) for r in self.board.interiors]
+            cut = gc.items_from_paths(lines, p.cut_outline_speed, p.cut_outline_power)
+            items += cut * max(1, p.cut_outline_passes)
         return items
 
     def generate_gcode(self, config: gc.GCodeConfig | None = None) -> str:
