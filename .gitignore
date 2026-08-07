@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 output/
 *.gcode
+.coverage
+.pytest_cache/
+htmlcov/
 *.nc
 build/
 dist/
