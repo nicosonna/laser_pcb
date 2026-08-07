@@ -28,7 +28,9 @@ class LayerConfig:
     name: str                      # ex. "top", "bottom", "copper_top"
     role: str = "top"              # "top" | "bottom"
     enabled: bool = True
-    mode: str = MODE_CENTERLINE
+    # Défaut = isolation offset : contours propres qui épousent le cuivre (standard).
+    # L'axe médian (MODE_CENTERLINE) est réservé aux zones fine-pitch serrées.
+    mode: str = MODE_ISOLATION
     passes: int = 1
     speed: float = 900.0           # mm/min (mode constant)
     power: float = 85.0            # % (mode constant)

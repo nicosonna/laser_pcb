@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 
 from shapely import box
+from shapely.geometry import Point
 from shapely.ops import unary_union
 
 from laserpcb import toolpath as tp
@@ -18,6 +19,26 @@ def test_isolation_rings_offset():
     assert len(rings.geoms) == 1
     # le contour est décalé de kerf/2 vers l'extérieur -> plus grand que le pad
     assert rings.geoms[0].length > sq.exterior.length
+
+
+def test_isolation_hugs_copper_but_medial_axis_wanders():
+    """INVARIANT QUALITÉ (le test qui manquait) : l'isolation offset reste collée
+    au cuivre, alors que l'axe médian traverse le milieu du vide — donc inadapté
+    comme tracé par défaut sur une carte entière."""
+    kerf = 0.2
+    copper = unary_union([box(0, 0, 2, 2), box(18, 0, 20, 2)])   # deux îlots éloignés
+    board = box(-1, -1, 21, 3)
+
+    rings = tp.isolation_rings(copper, kerf=kerf, rings=1)
+    max_iso = max(Point(p).distance(copper)
+                  for line in rings.geoms for p in line.coords)
+    assert max_iso < kerf                    # tout le tracé colle au cuivre
+
+    lab = LabeledCopper("t", {"a": box(0, 0, 2, 2), "b": box(18, 0, 20, 2)},
+                        board, has_nets=True)
+    segs = tp.centerline_isolation(lab, kerf=kerf, step=0.2)
+    max_med = max(Point(p).distance(copper) for s in segs for p in s.coords)
+    assert max_med > 5                       # l'axe médian passe ~8 mm du cuivre
 
 
 def test_negative_region_is_board_minus_copper():

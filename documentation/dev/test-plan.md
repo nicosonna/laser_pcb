@@ -44,7 +44,18 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 > finies et dans le plateau, DRC, aperçu brûlure, puis **streame vers un FakeGRBL**
 > (origine, pointeur, gravure). Validé sur le vrai `solar_pi.tar`.
 
-## Suite unités (`tests/unit/`) — 43 tests ✅ 2026-08-07
+## Leçon (2026-08-07) : tester le *produit*, pas seulement la *tuyauterie*
+
+Le mode par défaut (axe médian) produisait un tracé inutilisable sur carte entière,
+mais **tous les tests passaient** : ils validaient la mécanique (G-code GRBL valide,
+coords finies et dans le plateau, F/S varie) — jamais la **justesse géométrique** du
+tracé. Correctif : défaut = isolation offset, et un **invariant qualité**
+(`test_isolation_hugs_copper_but_medial_axis_wanders`) : le tracé d'isolation doit
+rester à ≈ kerf/2 du cuivre (l'axe médian s'en éloigne → aurait fait échouer le test).
+Règle ajoutée : tout algorithme géométrique a au moins un test d'invariant sur la
+*forme* de sa sortie, pas seulement sur sa validité formelle.
+
+## Suite unités (`tests/unit/`) — 44 tests ✅ 2026-08-07
 
 | Fichier | Tests | Code couvert | Points clés |
 |---|---|---|---|
