@@ -6,6 +6,7 @@ mince et que cette partie soit testable sans interface.
 
 from __future__ import annotations
 
+import tarfile
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
@@ -49,13 +50,10 @@ class Session:
         raise ValueError(f"Format PCB non reconnu dans {root}")
 
     def import_source(self, path: str | Path) -> None:
-        """Importe un dossier PCB (Gerber ou ODB++) ou un ZIP Gerber."""
+        """Importe un PCB : dossier (Gerber/ODB++) ou archive ZIP / TGZ / TAR."""
         path = Path(path)
-        if path.is_file() and path.suffix.lower() == ".zip":
-            tmp = Path(tempfile.mkdtemp(prefix="lpcb_"))
-            with zipfile.ZipFile(path) as z:
-                z.extractall(tmp)
-            path = _single_root(tmp)
+        if path.is_file():
+            path = _extract_archive(path)
         kind = self.detect_kind(path)
         self.source_root = path
         self.project.source_kind = kind
@@ -116,8 +114,20 @@ class Session:
                                        rings=cfg.rings)
             return gc.items_from_paths(rings, cfg.speed, cfg.power)
         if cfg.mode == MODE_NEGATIVE:
-            region = tp.negative_region(layer.labeled.union, self.board)
-            hatch = tp.hatch(region, spacing=self.project.kerf)
+            copper = layer.labeled.union
+            region = tp.negative_region(copper, self.board)
+            spacing = self.project.kerf
+            if cfg.adaptive:
+                # Évidement : liseré lent près des pistes, intérieur rapide au centre
+                # des grandes zones (le laser retire tout, mais va vite là où il peut).
+                margin = spacing * 4
+                edge, interior = tp.clearing_zones(region, copper, margin)
+                items = gc.items_from_paths(tp.hatch(edge, spacing=spacing),
+                                            cal.v_slow, cal.p_full)
+                items += gc.items_from_paths(tp.hatch(interior, spacing=spacing),
+                                             cal.v_fast, cal.p_full)
+                return items
+            hatch = tp.hatch(region, spacing=spacing)
             return gc.items_from_paths(hatch, cfg.speed, cfg.power)
         return []
 
@@ -157,6 +167,21 @@ class Session:
             if layer.config.name in saved:
                 layer.config = saved[layer.config.name]
         return s
+
+
+def _extract_archive(path: Path) -> Path:
+    """Extrait une archive ZIP / TGZ / TAR(.gz/.bz2) et renvoie sa racine."""
+    name = path.name.lower()
+    tmp = Path(tempfile.mkdtemp(prefix="lpcb_"))
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(path) as z:
+            z.extractall(tmp)
+    elif name.endswith((".tgz", ".tar.gz", ".tar", ".tar.bz2", ".tbz2", ".tar.xz")):
+        with tarfile.open(path) as t:
+            t.extractall(tmp)
+    else:
+        raise ValueError(f"Archive non reconnue : {path.name} (ZIP/TGZ/TAR attendus)")
+    return _single_root(tmp)
 
 
 def _single_root(tmp: Path) -> Path:

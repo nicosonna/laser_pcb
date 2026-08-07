@@ -6,8 +6,10 @@ Mode isolation offset (rapide) pour rester léger — l'axe médian est testé a
 
 from __future__ import annotations
 
+import tarfile
+
 from laserpcb.gui.session import Session
-from laserpcb.project import MODE_ISOLATION
+from laserpcb.project import MODE_ISOLATION, MODE_NEGATIVE
 
 GERBER = "examples/module_relais"
 ODBPP = "examples/solar_pi_odb"
@@ -36,6 +38,29 @@ def test_session_import_odb_and_gcode():
     prog = s.generate_gcode()
     assert "M4 S0" in prog and prog.rstrip().endswith("M2")
     assert len(prog.splitlines()) > 100
+
+
+def test_session_import_tgz(tmp_path):
+    """Import d'un ODB++ compressé en .tgz."""
+    tgz = tmp_path / "board.tgz"
+    with tarfile.open(tgz, "w:gz") as t:
+        t.add(ODBPP, arcname=".")
+    s = Session()
+    s.import_source(tgz)
+    assert s.project.source_kind == "odbpp"
+    assert len(s.layers) == 2
+    assert s.board.bounds[2] > 145
+
+
+def test_negative_adaptive_clearing_two_speeds():
+    """Le mode négatif adaptatif évide vite au centre, lentement près des pistes."""
+    s = Session()
+    s.import_source(ODBPP)
+    for layer in s.layers:
+        layer.config.mode = MODE_NEGATIVE
+        layer.config.adaptive = True
+    feeds = {round(f) for _c, f, _p in s.layer_items(s.layers[0])}
+    assert len(feeds) >= 2                    # au moins deux vitesses (bord / intérieur)
 
 
 def test_session_project_roundtrip(tmp_path):

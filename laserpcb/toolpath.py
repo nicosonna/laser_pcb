@@ -76,6 +76,22 @@ def negative_region(copper: BaseGeometry, board: Polygon,
     return _as_multipolygon(region)
 
 
+def clearing_zones(region: BaseGeometry, copper: BaseGeometry,
+                   margin: float) -> tuple[BaseGeometry, BaseGeometry]:
+    """Découpe la zone à évider en un liseré près du cuivre et un intérieur ouvert.
+
+    Permet de graver **lentement et proprement près des pistes** (le liseré, largeur
+    ``margin``) et **rapidement au milieu des grandes zones** (l'intérieur), tout en
+    couvrant toute la surface à retirer.
+
+    :return: (liseré_près_du_cuivre, intérieur_ouvert)
+    """
+    grown = copper.buffer(margin)
+    edge = region.intersection(grown)
+    interior = region.difference(grown)
+    return edge, interior
+
+
 def hatch(region: BaseGeometry, spacing: float = 0.12,
           angle: float = 0.0) -> MultiLineString:
     """Remplit une surface de lignes parallèles (balayage laser).

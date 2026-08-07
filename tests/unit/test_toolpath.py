@@ -35,6 +35,17 @@ def test_hatch_fills_region():
         assert ln.length <= 5.001
 
 
+def test_clearing_zones_edge_vs_interior():
+    """Évidement : liseré près du cuivre + intérieur ouvert, couvrant toute la zone."""
+    region = box(0, 0, 10, 10)
+    copper = box(4, 4, 6, 6)                # petite piste au centre
+    edge, interior = tp.clearing_zones(region, copper, margin=1.0)
+    assert not edge.is_empty and not interior.is_empty
+    assert interior.area > edge.area        # l'intérieur ouvert domine
+    # les deux réunis recouvrent la zone (à epsilon près)
+    assert abs((edge.area + interior.area) - region.area) < 0.05
+
+
 # ---- calibration adaptative ------------------------------------------------ #
 def test_calibration_endpoints_and_monotonic():
     cal = tp.Calibration()

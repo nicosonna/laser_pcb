@@ -28,6 +28,20 @@ class PcbCanvas(FigureCanvasQTAgg):
         super().__init__(self.fig)
         self.ax = self.fig.add_subplot(111)
         self.ax.set_aspect("equal")
+        self.mpl_connect("scroll_event", self._on_scroll)
+
+    def _on_scroll(self, event):
+        """Zoom à la molette, centré sur le curseur."""
+        if event.inaxes is None:
+            return
+        ax = self.ax
+        factor = 0.8 if event.button == "up" else 1.25
+        x, y = event.xdata, event.ydata
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        ax.set_xlim(x - (x - x0) * factor, x + (x1 - x) * factor)
+        ax.set_ylim(y - (y - y0) * factor, y + (y1 - y) * factor)
+        self.draw_idle()
 
     def render_session(self, session, toolpath_items=None):
         ax = self.ax

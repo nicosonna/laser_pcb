@@ -40,10 +40,13 @@ python -m venv .venv
 python -m laserpcb.gui.app
 ```
 
-Importer un dossier PCB (Gerber ou ODB++) ou un ZIP Gerber, régler chaque calque
-(mode, passes, vitesse/puissance ou adaptatif), prévisualiser les parcours, puis
-**exporter le G-code** (fichier ou carte SD) ou **enregistrer le projet** `.lpcb`
-(source embarquée, rouvrable plus tard).
+Importer un dossier PCB (Gerber ou ODB++) ou une **archive ZIP / TGZ / TAR**, régler
+chaque calque (mode, passes, vitesse/puissance ou adaptatif), **zoomer** (molette /
+barre d'outils), prévisualiser les parcours, puis **exporter le G-code** (fichier ou
+carte SD) ou **enregistrer le projet** `.lpcb` (source embarquée, rouvrable plus tard).
+
+Le **mode négatif adaptatif** évide entièrement les grandes zones sans cuivre
+(rapide au centre, lent près des pistes) au lieu d'un simple détourage.
 
 ## Aperçus rapides
 

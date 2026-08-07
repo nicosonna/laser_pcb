@@ -79,8 +79,15 @@ class MainWindow(QMainWindow):
         self.session = Session()
         self.resize(1100, 750)
 
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+        central = QWidget()
+        vbox = QVBoxLayout(central)
+        vbox.setContentsMargins(0, 0, 0, 0)
         self.canvas = PcbCanvas()
-        self.setCentralWidget(self.canvas)
+        self.nav = NavigationToolbar2QT(self.canvas, self)
+        vbox.addWidget(self.nav)
+        vbox.addWidget(self.canvas)
+        self.setCentralWidget(central)
         self._build_dock()
         self._build_send_dock()
         self._build_menu()
@@ -130,7 +137,7 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         m = self.menuBar().addMenu("&Fichier")
         m.addAction("Importer un dossier PCB…", self.import_folder)
-        m.addAction("Importer un ZIP Gerber…", self.import_zip)
+        m.addAction("Importer une archive (ZIP / TGZ / TAR)…", self.import_archive)
         m.addSeparator()
         m.addAction("Ouvrir un projet…", self.open_project)
         m.addAction("Enregistrer le projet…", self.save_project)
@@ -158,8 +165,10 @@ class MainWindow(QMainWindow):
         if d:
             self._import(d)
 
-    def import_zip(self):
-        f, _ = QFileDialog.getOpenFileName(self, "ZIP Gerber", filter="ZIP (*.zip)")
+    def import_archive(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Archive PCB",
+            filter="Archives PCB (*.zip *.tgz *.tar *.tar.gz *.tbz2);;Tous (*)")
         if f:
             self._import(f)
 

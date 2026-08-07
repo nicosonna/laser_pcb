@@ -37,7 +37,7 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 | 6 | DRC conscient des composants (footprint vs vrai court) + perf axe médian | ✅ 2026-08-07 |
 | — | Vérifs de gravure sur Falcon 2 (procédure manuelle) | à faire |
 
-## Suite unités (`tests/unit/`) — 39 tests ✅ 2026-08-07
+## Suite unités (`tests/unit/`) — 40 tests ✅ 2026-08-07
 
 | Fichier | Tests | Code couvert | Points clés |
 |---|---|---|---|
@@ -49,7 +49,11 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 | `test_project.py` | 2 | `project` (.lpcb) | round-trip nom/kind/kerf/calques, **source embarquée** recréée à l'octet près (portabilité) |
 | `test_sender.py` | 6 | `sender` (GRBL) | contre **FakeGRBL** : nettoyage commentaires, streaming complet + progression, `error:` → exception, `should_stop` → soft-reset, statut/temps réel (`?`/`!`/`~`/reset), jog/home |
 
-## Suite intégration (`tests/integration/`) — 8 tests ✅ 2026-08-07
+## Suite intégration (`tests/integration/`) — 10 tests ✅ 2026-08-07
+
+> Inclut aussi : import **ODB++ .tgz** (`test_session_import_tgz`) et **évidement
+> adaptatif** du mode négatif — vitesses distinctes bord/intérieur
+> (`test_negative_adaptive_clearing_two_speeds`).
 
 | Test | Vérifie |
 |---|---|
