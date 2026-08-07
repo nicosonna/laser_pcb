@@ -32,11 +32,12 @@ class LayerConfig:
     role: str = "top"              # "top" | "bottom"
     enabled: bool = True
     mode: str = MODE_COMBINED       # isolation + évidement, 1 passe entre pistes proches
-    # Découpe d'isolation calée sur une config LightBurn Falcon 2 qui marche :
-    # 600 mm/min, 100 %, ~20 passes pour ablater le cuivre.
-    passes: int = 20
-    speed: float = 600.0           # mm/min (découpe isolation)
-    power: float = 100.0           # % (découpe isolation)
+    # PROCÉDÉ = retirer la PEINTURE (masque), pas le cuivre -> puissance FAIBLE,
+    # peu de passes. Défauts prudents façon calque "image" LightBurn ; à AFFINER par
+    # un test matière (dépend de la peinture/épaisseur/couleur).
+    passes: int = 2
+    speed: float = 1500.0          # mm/min (retrait peinture sur les traits d'isolation)
+    power: float = 30.0            # % (juste brûler la peinture, pas le cuivre/FR4)
     adaptive: bool = True
     rings: int = 1                 # anneaux (mode isolation_offset)
 
