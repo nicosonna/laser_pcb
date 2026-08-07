@@ -32,10 +32,12 @@ class LayerConfig:
     role: str = "top"              # "top" | "bottom"
     enabled: bool = True
     mode: str = MODE_COMBINED       # isolation + évidement, 1 passe entre pistes proches
-    passes: int = 1
-    speed: float = 900.0           # mm/min (mode constant)
-    power: float = 85.0            # % (mode constant)
-    adaptive: bool = True          # si True, vitesse/puissance dérivées de la clairance
+    # Découpe d'isolation calée sur une config LightBurn Falcon 2 qui marche :
+    # 600 mm/min, 100 %, ~20 passes pour ablater le cuivre.
+    passes: int = 20
+    speed: float = 600.0           # mm/min (découpe isolation)
+    power: float = 100.0           # % (découpe isolation)
+    adaptive: bool = True
     rings: int = 1                 # anneaux (mode isolation_offset)
 
 

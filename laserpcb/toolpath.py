@@ -189,11 +189,13 @@ class Calibration:
     Défauts calés sur le **Creality Falcon 2 22 W** (spot ~0,08×0,1 mm, diode) :
     point de départ raisonnable pour de la gravure PCB, à affiner sur plaque test.
     """
+    # Défauts « évidement raster » calés sur une config LightBurn Falcon 2 qui marche
+    # (calque image : 1800–3000 mm/min, ~25–28 %). Sert au remplissage des zones.
     kerf: float = 0.10       # spot focalisé du Falcon 2 22 W (~0,08–0,1 mm)
-    v_fast: float = 3000.0   # mm/min en zone large
-    v_slow: float = 600.0    # mm/min en zone serrée
-    p_full: float = 100.0    # % en zone large
-    p_soft: float = 60.0     # % en zone serrée
+    v_fast: float = 3000.0   # mm/min au centre des grandes zones (évidement)
+    v_slow: float = 1800.0   # mm/min près des pistes (évidement)
+    p_full: float = 28.0     # % (évidement raster)
+    p_soft: float = 25.0     # %
     c_open: float = 0.60     # clairance considérée "large" (mm)
 
     @property

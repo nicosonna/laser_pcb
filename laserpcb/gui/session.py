@@ -123,13 +123,15 @@ class Session:
         cfg = layer.config
         cal = self.calibration()
         kerf = self.project.kerf
+        passes = max(1, cfg.passes)
         base = self._expanded(layer)
         union = base.union
 
         if cfg.mode == MODE_COMBINED:
             rings, wide = tp.combined_isolation(base, self.board, kerf=kerf)
-            items = gc.items_from_paths(rings, cfg.speed, cfg.power)   # isolation FIABLE
-            if not wide.is_empty:                          # évidement des grandes zones
+            # découpe d'isolation : N passes (ablate le cuivre) ; évidement : 1 passe
+            items = gc.items_from_paths(rings, cfg.speed, cfg.power) * passes
+            if not wide.is_empty:
                 edge, interior = tp.clearing_zones(wide, union, kerf * 4)
                 items += gc.items_from_paths(tp.hatch(edge, spacing=kerf), cal.v_slow, cal.p_full)
                 items += gc.items_from_paths(tp.hatch(interior, spacing=kerf), cal.v_fast, cal.p_full)
@@ -148,7 +150,7 @@ class Session:
             return gc.items_from_paths(paths, cfg.speed, cfg.power)
         if cfg.mode == MODE_ISOLATION:
             rings = tp.isolation_rings(union, kerf=kerf, rings=cfg.rings)
-            return gc.items_from_paths(rings, cfg.speed, cfg.power)
+            return gc.items_from_paths(rings, cfg.speed, cfg.power) * passes
         if cfg.mode == MODE_NEGATIVE:
             copper = union
             region = tp.negative_region(copper, self.board)
@@ -179,13 +181,14 @@ class Session:
         return self.active_side == "bottom" and self.mirror_bottom
 
     def active_items(self) -> list:
-        """Items G-code de la face active (cuivre + trous), NON miroités."""
+        """Items G-code de la face active (cuivre + trous), NON miroités.
+
+        Les passes sont gérées **dans** ``layer_items`` (la découpe d'isolation est
+        répétée N fois, mais pas l'évidement raster qui ne se fait qu'en 1 passe)."""
         items = []
         for layer in self.active_layers():
             if layer.config.enabled:
-                pcs = self.layer_items(layer)
-                for _ in range(max(1, layer.config.passes)):
-                    items.extend(pcs)
+                items.extend(self.layer_items(layer))
         p = self.project
         if p.hole_enabled and self.holes:
             rings = tp.hole_circles(self.holes, p.hole_scale_percent)
