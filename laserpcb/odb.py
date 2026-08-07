@@ -107,6 +107,17 @@ def _octagon(w: float, h: float) -> Polygon:
 _ORIENT = {"0": 0, "1": 90, "2": 180, "3": 270, "4": 0, "5": 90, "6": 180, "7": 270}
 
 
+def _pad_orient(tok: list[str]) -> float:
+    """Orientation d'un pad ODB++ (record P x y sym pol **dcode orient**).
+
+    Le champ après le D-code (tok[6]) porte l'orientation (0-7 -> 0/90/180/270°) ;
+    tok[5] est le D-code (toujours 0). Lire tok[5] rendait tous les pads à 0°.
+    """
+    if len(tok) > 6:
+        return _ORIENT.get(tok[6].split(";")[0], 0)
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # Parsing d'un fichier « features »
 # --------------------------------------------------------------------------- #
@@ -147,7 +158,7 @@ def _read_features(path: Path):
             x, y = float(tok[1]), float(tok[2])
             sym = symbols.get(int(tok[3]))
             pol = tok[4]
-            orient = _ORIENT.get(tok[5], 0) if len(tok) > 5 else 0
+            orient = _pad_orient(tok)
             if sym:
                 g = sym.flash(x, y, orient)
                 if g is not None:
@@ -271,7 +282,7 @@ def iter_features(path: Path):
             x, y = float(tok[1]), float(tok[2])
             sym = symbols.get(int(tok[3]))
             pol = tok[4]
-            orient = _ORIENT.get(tok[5], 0) if len(tok) > 5 else 0
+            orient = _pad_orient(tok)
             if sym:
                 geom = sym.flash(x, y, orient)
         elif rec == "S":

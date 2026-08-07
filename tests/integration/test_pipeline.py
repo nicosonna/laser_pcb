@@ -70,14 +70,11 @@ def test_drc_runs_on_full_layer(odb_root):
     assert frozenset(("N$35", "SW1")) in pairs
 
 
-def test_drc_component_aware_reclassifies_wago(odb_root):
-    """Conscience composants : le chevauchement GND/N$7 du connecteur WAGO P1 est
-    reclassé « footprint » (faux court éliminé) ; N$35/SW1 reste un vrai court."""
+def test_orientation_fix_removes_false_shorts(odb_root):
+    """Orientation des pads corrigée (lue dans le bon champ ODB++) : les faux courts
+    dus aux pads mal tournés (ex. connecteur WAGO GND/N$7) disparaissent ; il ne
+    reste que le vrai frôlement N$35/SW1."""
     feats = odb.load_features_by_net(odb_root, "top")
-    by_pair = {frozenset((s.net_a, s.net_b)): s for s in tp.drc(features=feats).shorts}
-
-    wago = by_pair[frozenset(("GND", "N$7"))]
-    assert wago.kind == "footprint" and wago.component == "P1"
-
-    sw = by_pair[frozenset(("N$35", "SW1"))]
-    assert sw.kind == "short"                 # piste sans composant -> vrai court
+    pairs = {frozenset((s.net_a, s.net_b)) for s in tp.drc(features=feats).shorts}
+    assert frozenset(("GND", "N$7")) not in pairs   # pads correctement orientés
+    assert frozenset(("N$35", "SW1")) in pairs       # vrai frôlement piste/pad
