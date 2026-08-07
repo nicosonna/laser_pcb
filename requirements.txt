@@ -1,0 +1,12 @@
+# Cœur géométrique + parsing Gerber/Excellon
+gerbonara>=1.5.0
+shapely>=2.0
+
+# Aperçu / rendu de développement
+matplotlib>=3.8
+
+# GUI (phase suivante)
+PySide6>=6.6
+
+# Communication laser GRBL (phase envoi)
+pyserial>=3.5

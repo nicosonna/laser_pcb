@@ -1,0 +1,24 @@
+{
+    "Header": {
+        "Comment": "All values are metric (mm)",
+        "CreationDate": "2025-07-14T23:48:31Z",
+        "GenerationSoftware": {
+            "Application": "Fusion Electronics",
+            "Vendor": "Autodesk",
+            "Version": "9.7.0"
+        },
+        "Part": "Single"
+    },
+    "Overall": {
+        "BoardThickness": 1.57,
+        "LayerNumber": 2,
+        "Name": {
+            "ProjectId": "Carte de circuit imprimé v21"
+        },
+        "Owner": "nicolas sonnard <nicolas.sonnard@gets.ch>",
+        "Size": {
+            "X": 80,
+            "Y": 135
+        }
+    }
+}
