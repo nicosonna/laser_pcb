@@ -4,12 +4,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QScrollArea, QSpinBox, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QProgressDialog,
+    QPushButton, QScrollArea, QSpinBox, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
+
+
+class _Worker(QThread):
+    """Exécute une fonction lourde dans un thread de fond (garde la GUI réactive)."""
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, fn):
+        super().__init__()
+        self._fn = fn
+
+    def run(self):
+        try:
+            self.done.emit(self._fn())
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
 
 from ..project import (LayerConfig, MODE_COMBINED, MODE_ISOLATION, MODE_NEGATIVE)
 from .canvas import PcbCanvas
@@ -78,6 +94,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("laser_pcb")
         self.session = Session()
         self._burn_items = None            # cache aperçu brûlure (invalidé si géométrie change)
+        self._worker = None                # thread de tâche lourde en cours
         self.resize(1100, 750)
 
         from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
@@ -363,37 +380,59 @@ class MainWindow(QMainWindow):
         self._burn_items = None
         self._render()
 
+    def run_busy(self, fn, on_done, title="Calcul en cours…"):
+        """Exécute ``fn`` (calcul lourd) dans un thread, avec un dialogue de chargement
+        animé — la fenêtre ne gèle plus. ``on_done(result)`` s'exécute sur la GUI."""
+        dlg = QProgressDialog(title, None, 0, 0, self)   # 0,0 = barre indéterminée
+        dlg.setWindowTitle("laser_pcb")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+
+        worker = _Worker(fn)
+
+        def finish(result=None, err=None):
+            dlg.close()
+            self._worker = None
+            if err:
+                QMessageBox.critical(self, "Erreur", err)
+            elif on_done:
+                on_done(result)
+
+        worker.done.connect(lambda r: finish(result=r))
+        worker.failed.connect(lambda m: finish(err=m))
+        worker.finished.connect(worker.deleteLater)
+        self._worker = worker            # garde une réf (sinon GC)
+        worker.start()
+
     def _render(self, *_):
         burn = self.burn_chk.isChecked()
-        items = None
-        if burn and self.session.layers:
-            # Cache : l'offset plateau / le miroir sont des transforms d'affichage,
-            # ils ne changent pas les parcours -> pas de recalcul en déplaçant le PCB.
-            if self._burn_items is None:
-                QApplication.setOverrideCursor(Qt.WaitCursor)
-                try:
-                    self._burn_items = self.session.active_items()
-                finally:
-                    QApplication.restoreOverrideCursor()
-            items = self._burn_items
+        if burn and self.session.layers and self._burn_items is None:
+            # calcul lourd des parcours -> thread + dialogue de chargement
+            self.run_busy(self.session.active_items, self._burn_ready, "Aperçu brûlure…")
+            return
+        items = self._burn_items if burn else None
         self.canvas.render_session(self.session, toolpath_items=items,
                                    roles=self._active_roles(),
                                    mirror=self.session.is_mirrored(), burn=burn)
 
+    def _burn_ready(self, items):
+        self._burn_items = items
+        self._render()                   # cache rempli -> rendu immédiat
+
     def preview_toolpaths(self):
         if not self.session.layers:
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        self.statusBar().showMessage("Calcul des parcours… (peut prendre un moment)")
-        try:
-            items = self.session.active_items()   # cuivre + trous (face active)
-            self.canvas.render_session(self.session, toolpath_items=items,
-                                       roles=self._active_roles(),
-                                       mirror=self.session.is_mirrored())
-            self.statusBar().showMessage(
-                f"{self.session.active_side} — {len(items)} segments de parcours.")
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.run_busy(self.session.active_items, self._on_preview_ready,
+                      "Calcul des parcours…")
+
+    def _on_preview_ready(self, items):
+        self.canvas.render_session(self.session, toolpath_items=items,
+                                   roles=self._active_roles(),
+                                   mirror=self.session.is_mirrored())
+        self.statusBar().showMessage(
+            f"{self.session.active_side} — {len(items)} segments de parcours.")
 
     def export_gcode(self):
         if not self.session.layers:
@@ -406,14 +445,14 @@ class MainWindow(QMainWindow):
             filter="G-code (*.gcode *.nc)")
         if not f:
             return
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            prog = self.session.generate_gcode()
-            Path(f).write_text(prog, encoding="utf-8")
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.run_busy(self.session.generate_gcode,
+                      lambda prog: self._write_gcode(f, prog, side),
+                      "Génération du G-code…")
+
+    def _write_gcode(self, path, prog, side):
+        Path(path).write_text(prog, encoding="utf-8")
         self.statusBar().showMessage(
-            f"G-code face {side} écrit : {f} ({len(prog.splitlines())} lignes)")
+            f"G-code face {side} écrit : {path} ({len(prog.splitlines())} lignes)")
 
     def save_project(self):
         if not self.session.layers:
