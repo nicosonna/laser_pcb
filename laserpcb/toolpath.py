@@ -43,7 +43,8 @@ def isolation_rings(copper: BaseGeometry, kerf: float = 0.15, rings: int = 1) ->
     lines: list[LineString] = []
     for i in range(rings):
         distance = kerf / 2.0 + i * kerf
-        offset = copper.buffer(distance, join_style="round")
+        # join "mitre" : coins DROITS -> les pads rectangulaires restent rectangulaires
+        offset = copper.buffer(distance, join_style="mitre", mitre_limit=5.0)
         lines.extend(_boundaries(offset))
     return MultiLineString(lines) if lines else MultiLineString()
 
@@ -103,7 +104,7 @@ def clearing_zones(region: BaseGeometry, copper: BaseGeometry,
 
     :return: (liseré_près_du_cuivre, intérieur_ouvert)
     """
-    grown = copper.buffer(margin)
+    grown = copper.buffer(margin, join_style="mitre", mitre_limit=5.0)
     edge = region.intersection(grown)
     interior = region.difference(grown)
     return edge, interior
@@ -287,19 +288,14 @@ def combined_isolation(labeled: LabeledCopper, board, kerf: float = 0.10,
     :return: (passes_uniques: list[Segment], zone_à_évider: MultiPolygon)
     """
     union = labeled.union
-    region = board.difference(union)                # tout le non-cuivre
-    tight_clear = tight_factor * kerf / 2.0
-
-    segs = centerline_isolation(labeled, kerf=kerf, step=step)
-    tight = [s for s in segs if s.clearance <= tight_clear]
-
-    if tight:
-        covered = unary_union([LineString(s.coords).buffer(tight_clear + kerf)
-                               for s in tight])
-        wide = region.difference(covered)           # zones larges hors passes serrées
-    else:
-        wide = region
-    return tight, _as_multipolygon(wide)
+    # Contours d'isolation : chaque cuivre entièrement entouré -> séparation FIABLE
+    # (aucun court possible), coins droits.
+    rings = isolation_rings(union, kerf=kerf, rings=1)
+    # Zone à évider : le non-cuivre AU-DELÀ du liseré d'isolation (le reste du fond),
+    # pour retirer l'excès de cuivre sans re-graver le bord des pistes.
+    liseré = union.buffer(kerf, join_style="mitre", mitre_limit=5.0)
+    wide = board.difference(liseré)
+    return rings, _as_multipolygon(wide)
 
 
 def expand_copper(labeled: LabeledCopper, margin: float,

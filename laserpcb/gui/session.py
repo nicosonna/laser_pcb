@@ -127,8 +127,8 @@ class Session:
         union = base.union
 
         if cfg.mode == MODE_COMBINED:
-            tight, wide = tp.combined_isolation(base, self.board, kerf=kerf)
-            items = gc.items_from_segments(tight, cal)     # passe unique dans les gaps serrés
+            rings, wide = tp.combined_isolation(base, self.board, kerf=kerf)
+            items = gc.items_from_paths(rings, cfg.speed, cfg.power)   # isolation FIABLE
             if not wide.is_empty:                          # évidement des grandes zones
                 edge, interior = tp.clearing_zones(wide, union, kerf * 4)
                 items += gc.items_from_paths(tp.hatch(edge, spacing=kerf), cal.v_slow, cal.p_full)
