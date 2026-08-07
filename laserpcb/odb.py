@@ -322,6 +322,29 @@ def load_drill(job_root: str | Path, layer: str = "through_+_hole",
     return holes
 
 
+def load_features_by_net(job_root: str | Path, layer: str,
+                         step: str | None = None) -> list[tuple[int, BaseGeometry, str, str | None]]:
+    """Features cuivre positives d'un calque : (index, géométrie, net, composant).
+
+    Base du DRC conscient des composants : permet de distinguer un chevauchement
+    intra-composant (empreinte) d'un vrai court inter-composants.
+    """
+    from .netlist import load_net_map, load_component_index
+
+    feats_path = _step_dir(Path(job_root), step) / "layers" / layer / "features"
+    net_map = load_net_map(job_root, layer, step)
+    match = load_component_index(job_root, layer, step)
+
+    out = []
+    for f in iter_features(feats_path):
+        if f.geom is None or f.geom.is_empty or f.polarity != "P":
+            continue
+        net = net_map.get(f.index) or "$NONE$"
+        comp = match(f.geom) if match else None
+        out.append((f.index, f.geom, net, comp))
+    return out
+
+
 def load_labeled_copper(job_root: str | Path, layer: str,
                         step: str | None = None) -> LabeledCopper:
     """Charge un calque cuivre ODB++ regroupé par NET (via la netlist).

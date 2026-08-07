@@ -68,3 +68,16 @@ def test_drc_runs_on_full_layer(odb_root):
     # au moins le contact N$35/SW1 repéré (corroboré visuellement)
     pairs = {frozenset((s.net_a, s.net_b)) for s in res.shorts}
     assert frozenset(("N$35", "SW1")) in pairs
+
+
+def test_drc_component_aware_reclassifies_wago(odb_root):
+    """Conscience composants : le chevauchement GND/N$7 du connecteur WAGO P1 est
+    reclassé « footprint » (faux court éliminé) ; N$35/SW1 reste un vrai court."""
+    feats = odb.load_features_by_net(odb_root, "top")
+    by_pair = {frozenset((s.net_a, s.net_b)): s for s in tp.drc(features=feats).shorts}
+
+    wago = by_pair[frozenset(("GND", "N$7"))]
+    assert wago.kind == "footprint" and wago.component == "P1"
+
+    sw = by_pair[frozenset(("N$35", "SW1"))]
+    assert sw.kind == "short"                 # piste sans composant -> vrai court

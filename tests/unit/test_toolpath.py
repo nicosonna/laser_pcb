@@ -95,3 +95,18 @@ def test_drc_no_shorts_without_nets(two_pads):
     a, b, board = two_pads
     lab = LabeledCopper("t", {"c0": a, "c1": b}, board, has_nets=False)
     assert tp.drc(lab).shorts == []
+
+
+def test_drc_component_aware_footprint_vs_short():
+    """Chevauchement même composant = footprint (info) ; composants ≠ = vrai court."""
+    a = box(0, 0, 2, 2)
+    b = box(1.5, 0, 3.5, 2)               # recouvre a sur 0.5 x 2 = 1 mm²
+    # même composant -> footprint (pas un vrai court)
+    res = tp.drc(features=[(1, a, "N1", "U7"), (2, b, "N2", "U7")])
+    assert len(res.shorts) == 1
+    assert res.shorts[0].kind == "footprint" and res.shorts[0].component == "U7"
+    assert res.real_shorts == [] and res.ok is True
+    # composants différents -> vrai court
+    res2 = tp.drc(features=[(1, a, "N1", "U7"), (2, b, "N2", "U8")])
+    assert res2.shorts[0].kind == "short"
+    assert len(res2.real_shorts) == 1 and res2.ok is False

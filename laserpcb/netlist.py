@@ -57,3 +57,50 @@ def load_net_map(job_root: str | Path, layer: str,
         if m and int(m.group(1)) == li:
             net_map[int(m.group(2))] = current
     return net_map
+
+
+_COMP_DIR = {"top": "comp_+_top", "bottom": "comp_+_bot"}
+
+
+def load_component_index(job_root: str | Path, layer: str, step: str | None = None):
+    """Renvoie une fonction ``match(geom) -> ref_composant | None`` (ou None).
+
+    Associe une feature (par la position de son centre) à la broche de composant la
+    plus proche, donc à sa référence (ex. ``P1``). Sert à distinguer un chevauchement
+    *intra-composant* (empreinte) d'un vrai court *inter-composants*.
+    """
+    comp_dir = _COMP_DIR.get(layer)
+    if not comp_dir:
+        return None
+    path = _step_dir(Path(job_root), step) / "layers" / comp_dir / "components"
+    if not path.exists():
+        return None
+
+    xs: list[float] = []
+    ys: list[float] = []
+    refs: list[str] = []
+    current: str | None = None
+    for line in path.read_text(errors="replace").splitlines():
+        t = line.split()
+        if not t:
+            continue
+        if t[0] == "CMP" and len(t) >= 7:
+            current = t[6]                       # référence (P1, U3, …)
+        elif t[0] == "TOP" and current and len(t) >= 4:
+            try:
+                xs.append(float(t[2])); ys.append(float(t[3])); refs.append(current)
+            except ValueError:
+                continue
+    if not xs:
+        return None
+
+    import numpy as np
+    from scipy.spatial import cKDTree
+    tree = cKDTree(np.column_stack([xs, ys]))
+
+    def match(geom, tol: float = 0.3):
+        c = geom.centroid
+        d, i = tree.query([c.x, c.y])
+        return refs[i] if d <= tol else None
+
+    return match

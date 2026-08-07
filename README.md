@@ -71,5 +71,5 @@ Règle : toute fonction ajoutée/modifiée a un test, couverture vérifiée à c
 - [x] Projets `.lpcb` — sauvegarde/réouverture avec source embarquée
 - [x] Envoi série direct GRBL — streaming + jog/home/pause + FakeGRBL pour tests
 - [x] Optimisation perf de l'axe médian (clip groupé : ~96 s → ~5 s, ~18×)
-- [ ] Fiabilisation du mapping net pour le DRC (faux positifs GND)
+- [x] DRC conscient des composants (footprint vs vrai court inter-composants)
 - [ ] Vérifications de gravure réelle sur le Falcon 2 (calibration kerf/puissance)

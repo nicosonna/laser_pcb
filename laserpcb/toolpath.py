@@ -258,6 +258,13 @@ class Short:
     x: float
     y: float
     area: float
+    kind: str = "short"          # "short" (vrai court inter-composants) | "footprint"
+    component: str | None = None  # référence si chevauchement intra-composant
+
+    @property
+    def is_real(self) -> bool:
+        """Vrai court à corriger (par opposition à un artefact d'empreinte)."""
+        return self.kind == "short"
 
 
 @dataclass
@@ -267,39 +274,107 @@ class DRCResult:
     min_clearance: float = float("inf")
 
     @property
+    def real_shorts(self) -> list[Short]:
+        return [s for s in self.shorts if s.is_real]
+
+    @property
+    def footprint_overlaps(self) -> list[Short]:
+        return [s for s in self.shorts if not s.is_real]
+
+    @property
     def ok(self) -> bool:
-        return not self.shorts and self.subkerf == 0
+        return not self.real_shorts and self.subkerf == 0
 
 
-def drc(labeled: LabeledCopper, segments: list[Segment] | None = None,
-        kerf: float = 0.15, min_short_area: float = 0.004) -> DRCResult:
+def drc(labeled: LabeledCopper | None = None, segments: list[Segment] | None = None,
+        kerf: float = 0.15, min_short_area: float = 0.004,
+        features: list | None = None) -> DRCResult:
     """Contrôle avant gravure : nets différents en contact + canaux trop étroits.
 
-    :param min_short_area: aire de recouvrement minimale (mm²) pour qualifier un
-        court-circuit. En dessous, c'est un simple contact ponctuel (tessellation
-        des courbes) — écarté pour éviter les faux positifs.
+    Deux modes :
+    - **features** fournis (ODB++ : liste ``(index, geom, net, composant)``) →
+      détection *feature-level* + **classification composant** : un chevauchement
+      entre deux features du **même composant** est un artefact d'empreinte
+      (``kind="footprint"``, informationnel), pas un vrai court.
+    - sinon **labeled** (Gerber ou repli) → recouvrement par paire de nets.
+
+    :param min_short_area: aire de recouvrement minimale (mm²) pour retenir un
+        contact — sous ce seuil, simple contact ponctuel (tessellation) écarté.
     """
     res = DRCResult()
-
-    if labeled.has_nets:
-        nets = [n for n in labeled.net_geoms if not n.startswith("$NONE$")]
-        geoms = {n: labeled.net_geoms[n] for n in nets}
-        bounds = {n: geoms[n].bounds for n in nets}
-        for i in range(len(nets)):
-            for j in range(i + 1, len(nets)):
-                na, nb = nets[i], nets[j]
-                if not _bbox_touch(bounds[na], bounds[nb]):
-                    continue
-                inter = geoms[na].intersection(geoms[nb])
-                # Vrai court = recouvrement 2D significatif (pas un point/segment).
-                if inter.area >= min_short_area:
-                    c = inter.centroid
-                    res.shorts.append(Short(na, nb, c.x, c.y, inter.area))
+    if features is not None:
+        res.shorts = _feature_level_shorts(features, min_short_area)
+    elif labeled is not None and labeled.has_nets:
+        res.shorts = _netpair_shorts(labeled, min_short_area)
 
     if segments:
         res.subkerf = sum(1 for s in segments if s.is_subkerf(kerf))
         res.min_clearance = min(s.clearance for s in segments)
     return res
+
+
+def _feature_level_shorts(features: list, min_area: float) -> list[Short]:
+    """Recouvrements inter-nets au niveau feature, classés footprint vs court."""
+    from collections import defaultdict
+    from shapely import STRtree
+
+    geoms = [g for _i, g, _n, _c in features]
+    tree = STRtree(geoms)
+    groups: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"inters": [], "same_comp": True, "comps": set()})
+
+    for i, (_fi, gi, ni, ci) in enumerate(features):
+        if ni.startswith("$NONE$"):
+            continue
+        for j in tree.query(gi):
+            j = int(j)
+            if j <= i:
+                continue
+            _fj, gj, nj, cj = features[j]
+            if nj.startswith("$NONE$") or ni == nj:
+                continue
+            if not gi.intersects(gj):
+                continue
+            inter = gi.intersection(gj)
+            if inter.is_empty or inter.area <= 0:
+                continue
+            key = tuple(sorted((ni, nj)))
+            g = groups[key]
+            g["inters"].append(inter)
+            same = ci is not None and ci == cj
+            g["same_comp"] = g["same_comp"] and same
+            g["comps"].add(ci if same else None)
+
+    out: list[Short] = []
+    for (na, nb), g in groups.items():
+        u = unary_union(g["inters"])
+        if u.area < min_area:
+            continue
+        c = u.centroid
+        footprint = g["same_comp"] and g["comps"] == {next(iter(g["comps"]))} and None not in g["comps"]
+        comp = next(iter(g["comps"])) if footprint else None
+        out.append(Short(na, nb, c.x, c.y, u.area,
+                         kind="footprint" if footprint else "short", component=comp))
+    out.sort(key=lambda s: -s.area)
+    return out
+
+
+def _netpair_shorts(labeled: LabeledCopper, min_area: float) -> list[Short]:
+    """Repli sans composants : recouvrement significatif par paire de nets."""
+    nets = [n for n in labeled.net_geoms if not n.startswith("$NONE$")]
+    geoms = {n: labeled.net_geoms[n] for n in nets}
+    bounds = {n: geoms[n].bounds for n in nets}
+    out: list[Short] = []
+    for i in range(len(nets)):
+        for j in range(i + 1, len(nets)):
+            na, nb = nets[i], nets[j]
+            if not _bbox_touch(bounds[na], bounds[nb]):
+                continue
+            inter = geoms[na].intersection(geoms[nb])
+            if inter.area >= min_area:
+                c = inter.centroid
+                out.append(Short(na, nb, c.x, c.y, inter.area))
+    return out
 
 
 def _bbox_touch(a, b, tol: float = 1e-6) -> bool:

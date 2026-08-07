@@ -51,9 +51,12 @@ def _draw_layer(ax, labeled, board, holes, title, shorts):
         ax.add_patch(MplCircle((h.x, h.y), h.diameter / 2, facecolor="white",
                                edgecolor="#333", linewidth=0.3, zorder=4))
     for s in shorts:
-        ax.add_patch(MplCircle((s.x, s.y), 1.4, fill=False, edgecolor="red",
-                               linewidth=1.8, zorder=6))
-        ax.annotate(f"{s.net_a}/{s.net_b}", (s.x, s.y), color="red", fontsize=7,
+        real = s.kind == "short"
+        col = "red" if real else "#e8820c"
+        label = f"{s.net_a}/{s.net_b}" + ("" if real else f"\n(footprint {s.component})")
+        ax.add_patch(MplCircle((s.x, s.y), 1.4, fill=False, edgecolor=col,
+                               linewidth=1.8, linestyle="-" if real else "--", zorder=6))
+        ax.annotate(label, (s.x, s.y), color=col, fontsize=7,
                     weight="bold", ha="center", va="bottom",
                     xytext=(0, 6), textcoords="offset points", zorder=7)
     ax.set_title(title)
@@ -67,15 +70,17 @@ def main(job, out):
     board = top.board
     holes = odb.load_drill(job)
 
-    shorts_top = tp.drc(top).shorts
-    shorts_bot = tp.drc(bottom).shorts
+    shorts_top = tp.drc(features=odb.load_features_by_net(job, "top")).shorts
+    shorts_bot = tp.drc(features=odb.load_features_by_net(job, "bottom")).shorts
+    reals = sum(1 for s in shorts_top + shorts_bot if s.kind == "short")
+    fps = sum(1 for s in shorts_top + shorts_bot if s.kind == "footprint")
     print(f"[i] nets top={len(top.net_geoms)} bottom={len(bottom.net_geoms)}, trous={len(holes)}")
-    print(f"[i] courts détectés : top={len(shorts_top)} bottom={len(shorts_bot)}")
+    print(f"[i] DRC : {reals} vrais courts (rouge), {fps} footprints même composant (orange)")
 
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(17, 7))
     _draw_layer(a1, top, board, holes, f"TOP — {len(top.net_geoms)} nets", shorts_top)
     _draw_layer(a2, bottom, board, holes, f"BOTTOM — {len(bottom.net_geoms)} nets", shorts_bot)
-    fig.suptitle("PCB coloré par net (vert = GND, gris = sans net) · cercles rouges = courts DRC",
+    fig.suptitle("PCB par net · rouge = vrai court inter-composants · orange = footprint (même composant)",
                  fontsize=12)
     fig.tight_layout()
     fig.savefig(out, dpi=170)
