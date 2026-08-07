@@ -42,8 +42,19 @@ python scripts/production_render.py examples/solar_pi_odb output/production.png
 python scripts/proto_adaptive.py examples/solar_pi_odb top output/adaptive.png
 ```
 
+## Tests
+
+```bash
+python tests/run_all.py           # unités + intégration
+python tests/run_all.py --cov     # avec couverture
+```
+
+Plan de test détaillé : [`documentation/dev/test-plan.md`](documentation/dev/test-plan.md).
+Règle : toute fonction ajoutée/modifiée a un test, couverture vérifiée à chaque ajout.
+
 ## Feuille de route
 
-- [ ] `gcode.py` — G-code GRBL Falcon 2 avec `F`/`S` adaptatif par segment
+- [x] `gcode.py` — G-code GRBL Falcon 2 avec `F`/`S` adaptatif par segment
+- [x] Suite de tests (unités + intégration, ~87 % de couverture)
 - [ ] GUI PySide6 — import, calques, réglages, aperçu, envoi série
 - [ ] Optimisation perf de l'axe médian ; fiabilisation du mapping net pour le DRC

@@ -1,0 +1,12 @@
+[run]
+source = laserpcb
+omit =
+    # Repli Gerber rarement atteint et branches de robustesse défensives
+    */__init__.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    raise NotImplementedError
+    if __name__ == .__main__.:
+show_missing = True
