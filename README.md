@@ -69,5 +69,6 @@ Règle : toute fonction ajoutée/modifiée a un test, couverture vérifiée à c
 - [x] Suite de tests (unités + intégration, ~83 % de couverture)
 - [x] GUI PySide6 — import, calques, réglages, aperçu, export G-code (fichier/SD)
 - [x] Projets `.lpcb` — sauvegarde/réouverture avec source embarquée
-- [ ] Envoi série direct GRBL (streaming + FakeGRBL pour tests)
+- [x] Envoi série direct GRBL — streaming + jog/home/pause + FakeGRBL pour tests
 - [ ] Optimisation perf de l'axe médian ; fiabilisation du mapping net pour le DRC
+- [ ] Vérifications de gravure réelle sur le Falcon 2 (calibration kerf/puissance)

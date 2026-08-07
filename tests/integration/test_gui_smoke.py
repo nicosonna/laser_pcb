@@ -28,5 +28,20 @@ def test_mainwindow_import_and_layers(qapp):
     w._import("examples/module_relais")
     assert len(w.session.layers) == 2
     assert len(w._layer_widgets) == 2          # panneau calques reconstruit
+    assert w.send_panel is not None            # panneau d'envoi présent
     # le canvas se rend sans erreur
     w.canvas.render_session(w.session)
+
+
+def test_stream_worker_engraves_via_fakegrbl(qapp):
+    """Le thread de streaming envoie bien tout le G-code à un FakeGRBL."""
+    from laserpcb.gui.send_panel import StreamWorker
+    from laserpcb.sender import FakeGrbl, GrblSender
+
+    fake = FakeGrbl()
+    sender = GrblSender(fake)
+    sender.connect()
+    worker = StreamWorker(sender, "G21\nG1 X5 F600 S500\nM5\n")
+    worker.start()
+    worker.wait(5000)                          # attend la fin du thread (5 s max)
+    assert fake.received == ["G21", "G1 X5 F600 S500", "M5"]

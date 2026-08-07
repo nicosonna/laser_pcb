@@ -82,13 +82,26 @@ class MainWindow(QMainWindow):
         self.canvas = PcbCanvas()
         self.setCentralWidget(self.canvas)
         self._build_dock()
+        self._build_send_dock()
         self._build_menu()
         self.statusBar().showMessage("Importez un PCB (Gerber ou ODB++) pour commencer.")
 
     # ---- construction UI ---------------------------------------------- #
+    def _build_send_dock(self):
+        from PySide6.QtWidgets import QDockWidget
+        from .send_panel import SendPanel
+        dock = QDockWidget("Envoyer au laser", self)
+        self.send_panel = SendPanel(get_gcode=lambda: self.session.generate_gcode())
+        dock.setWidget(self.send_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        if getattr(self, "_layers_dock", None):
+            self.tabifyDockWidget(self._layers_dock, dock)
+            self._layers_dock.raise_()
+
     def _build_dock(self):
         from PySide6.QtWidgets import QDockWidget
         dock = QDockWidget("Calques", self)
+        self._layers_dock = dock
         panel = QWidget(); self._panel_layout = QVBoxLayout(panel)
 
         kerf_box = QGroupBox("Général")
