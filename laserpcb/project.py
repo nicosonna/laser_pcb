@@ -17,6 +17,7 @@ from pathlib import Path
 SCHEMA = 1
 
 # Modes de gravure par calque
+MODE_HYBRID = "hybrid"          # offset propre + passe centrée dans les gaps serrés
 MODE_ISOLATION = "isolation_offset"
 MODE_CENTERLINE = "centerline"
 MODE_NEGATIVE = "negative"
@@ -28,9 +29,9 @@ class LayerConfig:
     name: str                      # ex. "top", "bottom", "copper_top"
     role: str = "top"              # "top" | "bottom"
     enabled: bool = True
-    # Défaut = isolation offset : contours propres qui épousent le cuivre (standard).
-    # L'axe médian (MODE_CENTERLINE) est réservé aux zones fine-pitch serrées.
-    mode: str = MODE_ISOLATION
+    # Défaut = hybride : contours offset propres, + passe unique centrée (axe médian)
+    # automatiquement dans les gaps serrés (fine-pitch) pour éviter le double trait.
+    mode: str = MODE_HYBRID
     passes: int = 1
     speed: float = 900.0           # mm/min (mode constant)
     power: float = 85.0            # % (mode constant)
@@ -46,6 +47,7 @@ class Project:
     source_files: dict[str, str] = field(default_factory=dict)  # relpath -> base64
     layers: list[LayerConfig] = field(default_factory=list)
     kerf: float = 0.10                         # spot Falcon 2 22 W (~0,08–0,1 mm)
+    copper_margin: float = 0.10                # élargit pistes/pads (laser + perchlorure)
     origin: tuple[float, float] = (0.0, 0.0)   # position du PCB sur le plateau (mm)
     bed_width: float = 400.0                   # plateau Falcon 2 : 400 × 415 mm
     bed_height: float = 415.0
@@ -92,6 +94,7 @@ class Project:
             source_files=d.get("source_files", {}),
             layers=layers,
             kerf=d.get("kerf", 0.10),
+            copper_margin=d.get("copper_margin", 0.10),
             origin=tuple(d.get("origin", (0.0, 0.0))),
             bed_width=d.get("bed_width", 400.0),
             bed_height=d.get("bed_height", 415.0),

@@ -272,6 +272,44 @@ def centerline_isolation(labeled: LabeledCopper, kerf: float = 0.15,
             for line, c in zip(lines, clr)]
 
 
+def hybrid_isolation(expanded: LabeledCopper, original: LabeledCopper,
+                     kerf: float = 0.10, tight_factor: float = 3.0, step: float = 0.08):
+    """Isolation hybride : contours offset propres + **passe unique centrée** (axe
+    médian) dans les gaps serrés — évite le double trait sur le fine-pitch.
+
+    - ``original`` : cuivre non élargi → sert à **détecter les gaps serrés** (qui
+      existent encore) et à y calculer la passe centrée. La passe re-sépare les
+      pads que la marge aurait fait fusionner.
+    - ``expanded`` : cuivre élargi de la marge → sert aux **contours offset** (pistes
+      plus larges pour survivre au laser + perchlorure).
+
+    Un gap est "serré" si sa demi-largeur (clairance) ≤ ``tight_factor * kerf/2``.
+
+    :return: (contours_offset: MultiLineString, passes_centrées: list[Segment])
+    """
+    tight_clear = tight_factor * kerf / 2.0
+
+    # Passes centrées : détectées sur le cuivre d'origine (les gaps y sont intacts).
+    segs = centerline_isolation(original, kerf=kerf, step=step)
+    tight = [s for s in segs if s.clearance <= tight_clear]
+
+    # Contours offset du cuivre élargi (à kerf/2 des pistes élargies)
+    union = expanded.union
+    rings = isolation_rings(union, kerf=kerf, rings=1)
+
+    # On retire des contours les portions situées dans les zones serrées, pour ne
+    # pas doubler la passe centrée qui y est déjà.
+    if tight:
+        tzone = unary_union([LineString(s.coords).buffer(tight_clear + kerf)
+                             for s in tight])
+        kept: list[LineString] = []
+        for line in rings.geoms:
+            kept.extend(_explode_lines(line.difference(tzone)))
+        rings = MultiLineString(kept)
+
+    return rings, tight
+
+
 def _explode_lines(geom: BaseGeometry) -> list[LineString]:
     if geom.is_empty:
         return []

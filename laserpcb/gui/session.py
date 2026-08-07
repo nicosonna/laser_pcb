@@ -18,7 +18,7 @@ from .. import odb
 from .. import gcode as gc
 from .. import toolpath as tp
 from ..project import (LayerConfig, Project,
-                       MODE_CENTERLINE, MODE_ISOLATION, MODE_NEGATIVE)
+                       MODE_HYBRID, MODE_CENTERLINE, MODE_ISOLATION, MODE_NEGATIVE)
 
 
 @dataclass
@@ -101,24 +101,46 @@ class Session:
                 setattr(c, k, v)
         return c
 
+    def _expanded(self, layer: LoadedLayer) -> LabeledCopper:
+        """Cuivre élargi de la marge (compensation laser + perchlorure), par net."""
+        margin = self.project.copper_margin
+        base = layer.labeled
+        if margin <= 0:
+            return base
+        exp = {n: g.buffer(margin) for n, g in base.net_geoms.items()}
+        return LabeledCopper(base.layer, exp, base.board, base.has_nets)
+
     def layer_items(self, layer: LoadedLayer):
-        """Renvoie les items G-code (coords, feed, power) d'un calque selon son mode."""
+        """Renvoie les items G-code (coords, feed, power) d'un calque selon son mode.
+
+        Le cuivre est d'abord **élargi** de ``copper_margin`` (pistes/pads plus larges
+        pour survivre au laser et à la gravure chimique).
+        """
         cfg = layer.config
         cal = self.calibration()
+        kerf = self.project.kerf
+        base = self._expanded(layer)
+        union = base.union
+
+        if cfg.mode == MODE_HYBRID:
+            # contours sur le cuivre élargi (base), passes centrées sur l'origine
+            rings, tight = tp.hybrid_isolation(base, layer.labeled, kerf=kerf)
+            items = gc.items_from_paths(rings, cfg.speed, cfg.power)
+            items += gc.items_from_segments(tight, cal)   # passes serrées adaptatives
+            return items
         if cfg.mode == MODE_CENTERLINE:
-            segs = tp.centerline_isolation(layer.labeled, kerf=self.project.kerf)
+            segs = tp.centerline_isolation(base, kerf=kerf)
             if cfg.adaptive:
                 return gc.items_from_segments(segs, cal)
             paths = [tp.LineString(s.coords) for s in segs]
             return gc.items_from_paths(paths, cfg.speed, cfg.power)
         if cfg.mode == MODE_ISOLATION:
-            rings = tp.isolation_rings(layer.labeled.union, kerf=self.project.kerf,
-                                       rings=cfg.rings)
+            rings = tp.isolation_rings(union, kerf=kerf, rings=cfg.rings)
             return gc.items_from_paths(rings, cfg.speed, cfg.power)
         if cfg.mode == MODE_NEGATIVE:
-            copper = layer.labeled.union
+            copper = union
             region = tp.negative_region(copper, self.board)
-            spacing = self.project.kerf
+            spacing = kerf
             if cfg.adaptive:
                 # Évidement : liseré lent près des pistes, intérieur rapide au centre
                 # des grandes zones (le laser retire tout, mais va vite là où il peut).

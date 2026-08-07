@@ -11,12 +11,14 @@ from PySide6.QtWidgets import (
     QScrollArea, QSpinBox, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..project import (LayerConfig, MODE_CENTERLINE, MODE_ISOLATION, MODE_NEGATIVE)
+from ..project import (LayerConfig, MODE_HYBRID, MODE_CENTERLINE, MODE_ISOLATION,
+                       MODE_NEGATIVE)
 from .canvas import PcbCanvas
 from .session import Session
 
-_MODES = [("Axe médian (net-aware)", MODE_CENTERLINE),
+_MODES = [("Hybride (offset + centré serré)", MODE_HYBRID),
           ("Isolation offset", MODE_ISOLATION),
+          ("Axe médian (net-aware)", MODE_CENTERLINE),
           ("Négatif (masque)", MODE_NEGATIVE)]
 
 
@@ -152,6 +154,10 @@ class MainWindow(QMainWindow):
         self.kerf.setValue(self.session.project.kerf); self.kerf.setSuffix(" mm")
         self.kerf.valueChanged.connect(self._on_kerf)
         kf.addRow("Kerf (trait laser)", self.kerf)
+        self.margin = QDoubleSpinBox(); self.margin.setRange(0, 0.3); self.margin.setSingleStep(0.01)
+        self.margin.setValue(self.session.project.copper_margin); self.margin.setSuffix(" mm")
+        self.margin.valueChanged.connect(self._on_margin)
+        kf.addRow("Marge cuivre (laser+chimie)", self.margin)
         self._panel_layout.addWidget(kerf_box)
 
         # --- Trous (réglages liés dynamiquement à la session courante) ---
@@ -240,6 +246,10 @@ class MainWindow(QMainWindow):
         self.session.project.kerf = v
         self._invalidate_toolpaths()       # le kerf change les parcours
 
+    def _on_margin(self, v):
+        self.session.project.copper_margin = v
+        self._invalidate_toolpaths()       # la marge élargit le cuivre
+
     def _set_hole(self, attr, v):
         setattr(self.session.project, attr, v)
         self._invalidate_toolpaths()       # les trous font partie des parcours
@@ -292,7 +302,8 @@ class MainWindow(QMainWindow):
         (signaux bloqués : le clamping des spin-box ne doit pas muter le projet)."""
         p = self.session.project
         pairs = [
-            (self.kerf, p.kerf), (self.hole_pct, p.hole_scale_percent),
+            (self.kerf, p.kerf), (self.margin, p.copper_margin),
+            (self.hole_pct, p.hole_scale_percent),
             (self.hole_speed, p.hole_speed), (self.hole_power, p.hole_power),
             (self.hole_passes, p.hole_passes), (self.bed_w, p.bed_width),
             (self.bed_h, p.bed_height), (self.org_x, p.origin[0]), (self.org_y, p.origin[1]),

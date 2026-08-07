@@ -93,6 +93,28 @@ def test_per_side_export_differs_and_mirrors():
     assert "_top" in top and "_bottom" in bot
 
 
+def test_copper_margin_widens_copper():
+    """La marge cuivre élargit bien pistes/pads (compensation laser + chimie)."""
+    s = Session()
+    s.import_source(ODBPP)
+    layer = s.layers[0]
+    s.project.copper_margin = 0.0
+    area0 = s._expanded(layer).union.area
+    s.project.copper_margin = 0.1
+    area1 = s._expanded(layer).union.area
+    assert area1 > area0
+
+
+def test_hybrid_is_default_and_generates():
+    """Le mode par défaut est l'hybride et produit un G-code valide."""
+    from laserpcb.project import MODE_HYBRID
+    s = Session()
+    s.import_source(ODBPP)
+    assert all(l.config.mode == MODE_HYBRID for l in s.layers)
+    g = s.generate_gcode()
+    assert "M4 S0" in g and g.rstrip().endswith("M2")
+
+
 def test_holes_add_lines_to_gcode():
     s = Session()
     s.import_source(ODBPP)

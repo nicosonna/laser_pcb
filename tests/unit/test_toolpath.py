@@ -56,6 +56,21 @@ def test_hatch_fills_region():
         assert ln.length <= 5.001
 
 
+def test_hybrid_isolation_single_pass_in_tight_gap():
+    """Hybride : gap serré -> passe unique centrée (pas de double contour)."""
+    a = box(0, 0, 1, 1)
+    b = box(1.2, 0, 2.2, 1)                  # gap serré de 0.2 mm entre a et b
+    board = box(-5, -5, 10, 6)
+    original = LabeledCopper("t", {"a": a, "b": b}, board, has_nets=True)
+    expanded = LabeledCopper("t", {"a": a.buffer(0.05), "b": b.buffer(0.05)},
+                             board, has_nets=True)
+    rings, tight = tp.hybrid_isolation(expanded, original, kerf=0.1)
+    assert len(tight) > 0                     # le gap serré est traité en passe centrée
+    xs = [x for s in tight for (x, _y) in s.coords]
+    assert any(1.0 < x < 1.2 for x in xs)     # la passe est au milieu du gap
+    assert not rings.is_empty                 # contours offset ailleurs
+
+
 def test_hole_circles_scaled():
     """Le pourcentage rétrécit le Ø du trou gravé (ex. -30 % -> 70 %)."""
     from laserpcb.geometry import Hole
