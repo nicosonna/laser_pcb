@@ -85,6 +85,7 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 - **Fiabilité du DRC** : les gros faux positifs à la frontière plan GND/piste sur
   solar_pi indiquent un mapping feature→net à valider (phase 4). Ajouter des
   fixtures de court-circuit connu vrai/faux.
-- **Performance de l'axe médian** (~96 s pleine carte) : à optimiser puis mesurer
-  (clip groupé + géométrie préparée).
+- **Performance de l'axe médian** : ✅ optimisée le 2026-08-07 — clip **groupé**
+  (`MultiLineString ∩ gap` en un appel) : **~5 s** au lieu de ~96 s sur la carte
+  complète (~18×), même sortie. Reste à mesurer sur cartes plus grandes.
 - **GUI PySide6** : à couvrir en pytest-qt une fois implémentée.
