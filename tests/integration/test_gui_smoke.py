@@ -22,10 +22,20 @@ def qapp():
     yield app
 
 
+def _wait_worker(qapp, w, timeout=60.0):
+    """Attend la fin de la tâche de fond (l'import est threadé désormais)."""
+    import time
+    t = time.time()
+    while w._worker is not None and time.time() - t < timeout:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+
 def test_mainwindow_import_and_layers(qapp):
     from laserpcb.gui.main_window import MainWindow
     w = MainWindow()
-    w._import("examples/module_relais")
+    w._import("examples/module_relais")        # async (thread) -> on attend
+    _wait_worker(qapp, w)
     assert len(w.session.layers) == 2
     assert len(w._layer_widgets) == 2          # panneau calques reconstruit
     assert w.send_panel is not None            # panneau d'envoi présent
