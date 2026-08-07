@@ -291,30 +291,11 @@ def combined_isolation(labeled: LabeledCopper, board, kerf: float = 0.10,
     # Contours d'isolation : chaque cuivre entièrement entouré -> séparation FIABLE
     # (aucun court possible), coins droits.
     rings = isolation_rings(union, kerf=kerf, rings=1)
-
-    # Single pass "là où c'est sûr" : dans les gaps serrés, on remplace le double
-    # contour par UNE passe centrée. Fail-safe : on ne retire le contour QUE dans la
-    # zone couverte par la passe centrée -> partout où le contour disparaît, la passe
-    # est présente -> toujours une coupe -> jamais de court.
-    tight_clear = tight_factor * kerf / 2.0
-    segs = centerline_isolation(labeled, kerf=kerf, step=step)
-    tight = [s for s in segs if s.clearance <= tight_clear]
-    tzone = None
-    if tight:
-        tzone = unary_union([LineString(s.coords).buffer(tight_clear + kerf / 2)
-                             for s in tight])
-        kept: list[LineString] = []
-        for line in rings.geoms:
-            kept.extend(_explode_lines(line.difference(tzone)))
-        rings = MultiLineString(kept)
-
-    # Évidement : le non-cuivre AU-DELÀ du liseré d'isolation (retire l'excès de
-    # cuivre sans re-graver le bord des pistes ni les zones serrées déjà traitées).
+    # Zone à évider : le non-cuivre AU-DELÀ du liseré d'isolation (le reste du fond),
+    # pour retirer l'excès de cuivre sans re-graver le bord des pistes.
     liseré = union.buffer(kerf, join_style="mitre", mitre_limit=5.0)
     wide = board.difference(liseré)
-    if tzone is not None:
-        wide = wide.difference(tzone)
-    return rings, tight, _as_multipolygon(wide)
+    return rings, _as_multipolygon(wide)
 
 
 def expand_copper(labeled: LabeledCopper, margin: float,
