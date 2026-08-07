@@ -17,10 +17,12 @@ from pathlib import Path
 SCHEMA = 1
 
 # Modes de gravure par calque
-MODE_HYBRID = "hybrid"          # offset propre + passe centrée dans les gaps serrés
-MODE_ISOLATION = "isolation_offset"
+MODE_ISOLATION = "isolation_offset"   # contours qui épousent le cuivre
+MODE_NEGATIVE = "negative"            # évidement des zones sans cuivre (masque)
+MODE_COMBINED = "combined"            # isolation + évidement : 1 passe entre pistes proches
+# (anciens modes retirés du choix utilisateur, gardés pour compat des projets)
+MODE_HYBRID = "hybrid"
 MODE_CENTERLINE = "centerline"
-MODE_NEGATIVE = "negative"
 
 
 @dataclass
@@ -29,9 +31,7 @@ class LayerConfig:
     name: str                      # ex. "top", "bottom", "copper_top"
     role: str = "top"              # "top" | "bottom"
     enabled: bool = True
-    # Défaut = hybride : contours offset propres, + passe unique centrée (axe médian)
-    # automatiquement dans les gaps serrés (fine-pitch) pour éviter le double trait.
-    mode: str = MODE_HYBRID
+    mode: str = MODE_COMBINED       # isolation + évidement, 1 passe entre pistes proches
     passes: int = 1
     speed: float = 900.0           # mm/min (mode constant)
     power: float = 85.0            # % (mode constant)

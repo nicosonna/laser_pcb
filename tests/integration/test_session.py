@@ -105,12 +105,12 @@ def test_copper_margin_widens_copper():
     assert area1 > area0
 
 
-def test_hybrid_is_default_and_generates():
-    """Le mode par défaut est l'hybride et produit un G-code valide."""
-    from laserpcb.project import MODE_HYBRID
+def test_combined_is_default_and_generates():
+    """Le mode par défaut est combiné (isolation + évidement) et produit du G-code."""
+    from laserpcb.project import MODE_COMBINED
     s = Session()
     s.import_source(ODBPP)
-    assert all(l.config.mode == MODE_HYBRID for l in s.layers)
+    assert all(l.config.mode == MODE_COMBINED for l in s.layers)
     g = s.generate_gcode()
     assert "M4 S0" in g and g.rstrip().endswith("M2")
 

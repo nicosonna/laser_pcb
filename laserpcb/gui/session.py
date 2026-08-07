@@ -17,8 +17,8 @@ from .. import geometry as geo
 from .. import odb
 from .. import gcode as gc
 from .. import toolpath as tp
-from ..project import (LayerConfig, Project,
-                       MODE_HYBRID, MODE_CENTERLINE, MODE_ISOLATION, MODE_NEGATIVE)
+from ..project import (LayerConfig, Project, MODE_HYBRID, MODE_CENTERLINE,
+                       MODE_COMBINED, MODE_ISOLATION, MODE_NEGATIVE)
 
 
 @dataclass
@@ -126,6 +126,14 @@ class Session:
         base = self._expanded(layer)
         union = base.union
 
+        if cfg.mode == MODE_COMBINED:
+            tight, wide = tp.combined_isolation(base, self.board, kerf=kerf)
+            items = gc.items_from_segments(tight, cal)     # passe unique dans les gaps serrés
+            if not wide.is_empty:                          # évidement des grandes zones
+                edge, interior = tp.clearing_zones(wide, union, kerf * 4)
+                items += gc.items_from_paths(tp.hatch(edge, spacing=kerf), cal.v_slow, cal.p_full)
+                items += gc.items_from_paths(tp.hatch(interior, spacing=kerf), cal.v_fast, cal.p_full)
+            return items
         if cfg.mode == MODE_HYBRID:
             # contours sur le cuivre élargi (base), passes centrées sur l'origine
             rings, tight = tp.hybrid_isolation(base, layer.labeled, kerf=kerf)

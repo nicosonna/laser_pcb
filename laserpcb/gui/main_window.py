@@ -11,14 +11,12 @@ from PySide6.QtWidgets import (
     QScrollArea, QSpinBox, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..project import (LayerConfig, MODE_HYBRID, MODE_CENTERLINE, MODE_ISOLATION,
-                       MODE_NEGATIVE)
+from ..project import (LayerConfig, MODE_COMBINED, MODE_ISOLATION, MODE_NEGATIVE)
 from .canvas import PcbCanvas
 from .session import Session
 
-_MODES = [("Hybride (offset + centré serré)", MODE_HYBRID),
+_MODES = [("Isolation + évidement", MODE_COMBINED),
           ("Isolation offset", MODE_ISOLATION),
-          ("Axe médian (net-aware)", MODE_CENTERLINE),
           ("Négatif (masque)", MODE_NEGATIVE)]
 
 

@@ -272,6 +272,36 @@ def centerline_isolation(labeled: LabeledCopper, kerf: float = 0.15,
             for line, c in zip(lines, clr)]
 
 
+def combined_isolation(labeled: LabeledCopper, board, kerf: float = 0.10,
+                       tight_factor: float = 3.0, step: float = 0.08):
+    """Isolation + évidement, avec **une seule passe** entre pistes/pads proches.
+
+    - Gaps serrés (clairance ≤ ``tight_factor*kerf/2``) : **passe unique centrée**
+      (un seul trait de laser entre deux cuivres, pas deux).
+    - Reste des zones sans cuivre : **évidement** (à hachurer par le caller).
+
+    S'adapte au design : sur une carte à plan de masse, seules les fines clairances
+    sont serrées → passes uniques (isolation) ; sur une carte "pistes seules", les
+    grandes zones sont évidées.
+
+    :return: (passes_uniques: list[Segment], zone_à_évider: MultiPolygon)
+    """
+    union = labeled.union
+    region = board.difference(union)                # tout le non-cuivre
+    tight_clear = tight_factor * kerf / 2.0
+
+    segs = centerline_isolation(labeled, kerf=kerf, step=step)
+    tight = [s for s in segs if s.clearance <= tight_clear]
+
+    if tight:
+        covered = unary_union([LineString(s.coords).buffer(tight_clear + kerf)
+                               for s in tight])
+        wide = region.difference(covered)           # zones larges hors passes serrées
+    else:
+        wide = region
+    return tight, _as_multipolygon(wide)
+
+
 def expand_copper(labeled: LabeledCopper, margin: float,
                   min_gap: float) -> LabeledCopper:
     """Élargit chaque net de ``margin`` **sans jamais ponter un autre net**.
