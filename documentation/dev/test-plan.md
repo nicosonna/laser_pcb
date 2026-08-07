@@ -56,7 +56,10 @@ automatisable est la gravure physique sur le Falcon 2 (voir plus bas).
 | `test_project.py` | 2 | `project` (.lpcb) | round-trip nom/kind/kerf/calques, **source embarquée** recréée à l'octet près (portabilité) |
 | `test_sender.py` | 6 | `sender` (GRBL) | contre **FakeGRBL** : nettoyage commentaires, streaming complet + progression, `error:` → exception, `should_stop` → soft-reset, statut/temps réel (`?`/`!`/`~`/reset), jog/home |
 
-## Suite intégration (`tests/integration/`) — 13 tests ✅ 2026-08-07
+## Suite intégration (`tests/integration/`) — 15 tests ✅ 2026-08-07
+
+> Régressions de la revue de code : contour panélisé **MultiPolygon** rendu sans
+> crash, et ouverture de projet qui **ne clampe pas** les valeurs hors plage.
 
 > Inclut aussi : import **ODB++ .tgz**, **évidement adaptatif** (vitesses bord/
 > intérieur), **centrage plateau** décalant le G-code (`test_center_on_bed_offsets_gcode`),

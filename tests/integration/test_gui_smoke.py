@@ -33,6 +33,27 @@ def test_mainwindow_import_and_layers(qapp):
     w.canvas.render_session(w.session)
 
 
+def test_canvas_handles_multipolygon_board(qapp):
+    """Contour de carte panélisé (MultiPolygon) : le rendu ne doit pas planter."""
+    from shapely import box
+    from shapely.geometry import MultiPolygon
+    from laserpcb.gui.canvas import PcbCanvas
+    from laserpcb.gui.session import Session
+    s = Session()
+    s.board = MultiPolygon([box(0, 0, 10, 10), box(20, 0, 30, 10)])
+    PcbCanvas().render_session(s)              # ne lève pas AttributeError
+
+
+def test_refresh_settings_preserves_out_of_range_values(qapp):
+    """Ouvrir un projet ne doit pas clamper/réécrire des valeurs hors plage."""
+    from laserpcb.gui.main_window import MainWindow
+    w = MainWindow()
+    w._import("examples/module_relais")
+    w.session.project.kerf = 0.005            # sous le minimum du spin-box (0.01)
+    w._refresh_settings()
+    assert w.session.project.kerf == 0.005    # inchangé (signaux bloqués)
+
+
 def test_stream_worker_engraves_via_fakegrbl(qapp):
     """Le thread de streaming envoie bien tout le G-code à un FakeGRBL."""
     from laserpcb.gui.send_panel import StreamWorker

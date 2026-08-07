@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("laser_pcb")
         self.session = Session()
+        self._burn_items = None            # cache aperçu brûlure (invalidé si géométrie change)
         self.resize(1100, 750)
 
         from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
@@ -158,20 +159,20 @@ class MainWindow(QMainWindow):
         holes_box = QGroupBox("Trous")
         holes_box.setCheckable(True)
         holes_box.setChecked(p.hole_enabled)
-        holes_box.toggled.connect(lambda on: setattr(self.session.project, "hole_enabled", on))
+        holes_box.toggled.connect(lambda on: self._set_hole("hole_enabled", on))
         hf = QFormLayout(holes_box)
         self.hole_pct = QDoubleSpinBox(); self.hole_pct.setRange(-90, 50)
         self.hole_pct.setValue(p.hole_scale_percent); self.hole_pct.setSuffix(" %")
-        self.hole_pct.valueChanged.connect(lambda v: setattr(self.session.project, "hole_scale_percent", v))
+        self.hole_pct.valueChanged.connect(lambda v: self._set_hole("hole_scale_percent", v))
         self.hole_speed = QDoubleSpinBox(); self.hole_speed.setRange(1, 10000)
         self.hole_speed.setValue(p.hole_speed); self.hole_speed.setSuffix(" mm/min")
-        self.hole_speed.valueChanged.connect(lambda v: setattr(self.session.project, "hole_speed", v))
+        self.hole_speed.valueChanged.connect(lambda v: self._set_hole("hole_speed", v))
         self.hole_power = QDoubleSpinBox(); self.hole_power.setRange(0, 100)
         self.hole_power.setValue(p.hole_power); self.hole_power.setSuffix(" %")
-        self.hole_power.valueChanged.connect(lambda v: setattr(self.session.project, "hole_power", v))
+        self.hole_power.valueChanged.connect(lambda v: self._set_hole("hole_power", v))
         self.hole_passes = QSpinBox(); self.hole_passes.setRange(1, 20)
         self.hole_passes.setValue(p.hole_passes)
-        self.hole_passes.valueChanged.connect(lambda v: setattr(self.session.project, "hole_passes", v))
+        self.hole_passes.valueChanged.connect(lambda v: self._set_hole("hole_passes", v))
         hf.addRow("Taille (± % du Ø)", self.hole_pct)
         hf.addRow("Vitesse", self.hole_speed)
         hf.addRow("Puissance", self.hole_power)
@@ -230,20 +231,25 @@ class MainWindow(QMainWindow):
         self._layer_widgets = []
         for layer in self.session.layers:
             w = LayerWidget(layer.config)
-            w.changed.connect(self._render)
+            w.changed.connect(self._invalidate_toolpaths)   # mode/passes/... change les parcours
             self._layers_container.addWidget(w)
             self._layer_widgets.append(w)
 
     # ---- actions ------------------------------------------------------- #
     def _on_kerf(self, v):
         self.session.project.kerf = v
+        self._invalidate_toolpaths()       # le kerf change les parcours
+
+    def _set_hole(self, attr, v):
+        setattr(self.session.project, attr, v)
+        self._invalidate_toolpaths()       # les trous font partie des parcours
 
     def _active_roles(self):
         return [self.session.active_side]
 
     def _on_side(self, *_):
         self.session.active_side = self.side.currentData()
-        self._render()
+        self._invalidate_toolpaths()       # autre face = autres parcours
 
     def _on_mirror(self, *_):
         self.session.mirror_bottom = self.mirror.isChecked()
@@ -282,20 +288,23 @@ class MainWindow(QMainWindow):
             self._import(d)
 
     def _refresh_settings(self):
-        """Synchronise les widgets généraux avec la session courante."""
+        """Synchronise les widgets avec la session, **sans** réécrire les valeurs
+        (signaux bloqués : le clamping des spin-box ne doit pas muter le projet)."""
         p = self.session.project
-        self.kerf.setValue(p.kerf)
-        self._holes_box.setChecked(p.hole_enabled)
-        self.hole_pct.setValue(p.hole_scale_percent)
-        self.hole_speed.setValue(p.hole_speed)
-        self.hole_power.setValue(p.hole_power)
-        self.hole_passes.setValue(p.hole_passes)
-        self.bed_w.setValue(p.bed_width)
-        self.bed_h.setValue(p.bed_height)
-        for spin, val in ((self.org_x, p.origin[0]), (self.org_y, p.origin[1])):
-            spin.blockSignals(True); spin.setValue(val); spin.blockSignals(False)
+        pairs = [
+            (self.kerf, p.kerf), (self.hole_pct, p.hole_scale_percent),
+            (self.hole_speed, p.hole_speed), (self.hole_power, p.hole_power),
+            (self.hole_passes, p.hole_passes), (self.bed_w, p.bed_width),
+            (self.bed_h, p.bed_height), (self.org_x, p.origin[0]), (self.org_y, p.origin[1]),
+        ]
+        for widget, val in pairs:
+            widget.blockSignals(True); widget.setValue(val); widget.blockSignals(False)
+        for widget, state in ((self._holes_box, p.hole_enabled),
+                              (self.mirror, self.session.mirror_bottom)):
+            widget.blockSignals(True); widget.setChecked(state); widget.blockSignals(False)
+        self.side.blockSignals(True)
         self.side.setCurrentIndex(0 if self.session.active_side == "top" else 1)
-        self.mirror.setChecked(self.session.mirror_bottom)
+        self.side.blockSignals(False)
 
     def _import(self, path):
         try:
@@ -304,6 +313,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Ouvrir", f"Échec de l'ouverture :\n{e}")
             return
+        self._burn_items = None
         self._refresh_settings()
         self._rebuild_layers()
         self._render()
@@ -311,15 +321,24 @@ class MainWindow(QMainWindow):
             f"{self.session.project.source_kind.upper()} — {len(self.session.layers)} calques, "
             f"{len(self.session.holes)} trous.")
 
+    def _invalidate_toolpaths(self, *_):
+        """La géométrie des parcours a changé : recalcul nécessaire au prochain rendu."""
+        self._burn_items = None
+        self._render()
+
     def _render(self, *_):
         burn = self.burn_chk.isChecked()
         items = None
         if burn and self.session.layers:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                items = self.session.active_items()
-            finally:
-                QApplication.restoreOverrideCursor()
+            # Cache : l'offset plateau / le miroir sont des transforms d'affichage,
+            # ils ne changent pas les parcours -> pas de recalcul en déplaçant le PCB.
+            if self._burn_items is None:
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                try:
+                    self._burn_items = self.session.active_items()
+                finally:
+                    QApplication.restoreOverrideCursor()
+            items = self._burn_items
         self.canvas.render_session(self.session, toolpath_items=items,
                                    roles=self._active_roles(),
                                    mirror=self.session.is_mirrored(), burn=burn)
@@ -380,6 +399,7 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Projet", f"Échec de l'ouverture :\n{e}")
             return
+        self._burn_items = None
         self._refresh_settings()
         self._rebuild_layers()
         self._render()

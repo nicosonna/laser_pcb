@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import collections
 import re
+import threading
 import time
 from typing import Callable, Protocol
 
@@ -143,10 +144,17 @@ class GrblSender:
     def __init__(self, transport: Transport, empty_reads_timeout: int = 2000):
         self.t = transport
         self._empty_timeout = empty_reads_timeout
+        self._wlock = threading.Lock()       # sérialise les écritures (streaming vs temps réel)
+
+    def _write(self, data: bytes) -> int:
+        """Écriture série protégée par verrou (pause/reprise depuis le thread GUI
+        pendant que le thread de streaming écrit les lignes)."""
+        with self._wlock:
+            return self.t.write(data)
 
     # ---- connexion ---------------------------------------------------------- #
     def connect(self) -> None:
-        self.t.write(b"\r\n\r\n")            # réveille GRBL
+        self._write(b"\r\n\r\n")             # réveille GRBL
         time.sleep(0)                        # (no-op ; hook si transport réel lent)
         self._drain()
 
@@ -174,7 +182,7 @@ class GrblSender:
             # message poussé (état <...>, [MSG:...], bannière) -> ignoré ici
 
     def send_line(self, line: str) -> str:
-        self.t.write((line + "\n").encode())
+        self._write((line + "\n").encode())
         return self._read_response()
 
     def stream(self, gcode: str,
@@ -194,7 +202,7 @@ class GrblSender:
 
     # ---- commandes temps réel ---------------------------------------------- #
     def status(self) -> str:
-        self.t.write(b"?")
+        self._write(b"?")
         for _ in range(100):
             raw = self.t.readline()
             if not raw:
@@ -205,13 +213,13 @@ class GrblSender:
         return "?"
 
     def feed_hold(self) -> None:
-        self.t.write(b"!")
+        self._write(b"!")
 
     def resume(self) -> None:
-        self.t.write(b"~")
+        self._write(b"~")
 
     def soft_reset(self) -> None:
-        self.t.write(b"\x18")
+        self._write(b"\x18")
         self._drain()
 
     # ---- mouvements -------------------------------------------------------- #

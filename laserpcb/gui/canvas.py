@@ -74,8 +74,9 @@ class PcbCanvas(FigureCanvasQTAgg):
 
         if session.board is not None and not session.board.is_empty:
             b = xf(session.board)
-            bx, by = b.exterior.xy
-            ax.fill(bx, by, facecolor="#efe7c8", edgecolor="#7a6a2a", linewidth=1, zorder=1)
+            for poly in getattr(b, "geoms", [b]):   # contour éventuellement multi (carte panélisée)
+                bx, by = poly.exterior.xy
+                ax.fill(bx, by, facecolor="#efe7c8", edgecolor="#7a6a2a", linewidth=1, zorder=1)
 
         if burn:
             # Aperçu brûlure : là où le laser passe = traits épaissis du kerf, en noir.
