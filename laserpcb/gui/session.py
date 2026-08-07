@@ -204,6 +204,15 @@ class Session:
             items += cut * max(1, p.cut_outline_passes)
         return items
 
+    def burn_geometry(self):
+        """Géométrie de la zone gravée (union des traits épaissis du kerf) — calcul
+        lourd, à lancer dans un thread (pas dans le rendu qui est sur la GUI)."""
+        from shapely.geometry import LineString
+        from shapely.ops import unary_union
+        strokes = [LineString(c).buffer(self.project.kerf / 2, cap_style="round")
+                   for c, _f, _p in self.active_items() if len(c) >= 2]
+        return unary_union(strokes) if strokes else None
+
     def generate_gcode(self, config: gc.GCodeConfig | None = None) -> str:
         """G-code absolu de la **face active** : miroir (bottom) puis offset plateau.
 

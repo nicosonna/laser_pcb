@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
     QPushButton, QScrollArea, QSpinBox, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
+from ..project import (LayerConfig, MODE_COMBINED, MODE_ISOLATION, MODE_NEGATIVE)
+from .canvas import PcbCanvas
+from .session import Session
+
 
 class _Worker(QThread):
     """Exécute une fonction lourde dans un thread de fond (garde la GUI réactive)."""
@@ -26,10 +30,6 @@ class _Worker(QThread):
             self.done.emit(self._fn())
         except Exception as e:  # noqa: BLE001
             self.failed.emit(str(e))
-
-from ..project import (LayerConfig, MODE_COMBINED, MODE_ISOLATION, MODE_NEGATIVE)
-from .canvas import PcbCanvas
-from .session import Session
 
 _MODES = [("Isolation + évidement", MODE_COMBINED),
           ("Isolation offset", MODE_ISOLATION),
@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("laser_pcb")
         self.session = Session()
-        self._burn_items = None            # cache aperçu brûlure (invalidé si géométrie change)
+        self._burn_geom = None            # cache aperçu brûlure (invalidé si géométrie change)
         self._worker = None                # thread de tâche lourde en cours
         self.resize(1100, 750)
 
@@ -361,13 +361,15 @@ class MainWindow(QMainWindow):
         self.side.blockSignals(False)
 
     def _import(self, path):
-        try:
-            self.session = Session()
-            self.session.import_source(path)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "Ouvrir", f"Échec de l'ouverture :\n{e}")
-            return
-        self._burn_items = None
+        def load():
+            s = Session()
+            s.import_source(path)
+            return s
+        self.run_busy(load, self._on_session_loaded, "Ouverture du PCB…")
+
+    def _on_session_loaded(self, session):
+        self.session = session
+        self._burn_geom = None
         self._refresh_settings()
         self._rebuild_layers()
         self._render()
@@ -377,7 +379,7 @@ class MainWindow(QMainWindow):
 
     def _invalidate_toolpaths(self, *_):
         """La géométrie des parcours a changé : recalcul nécessaire au prochain rendu."""
-        self._burn_items = None
+        self._burn_geom = None
         self._render()
 
     def run_busy(self, fn, on_done, title="Calcul en cours…"):
@@ -408,17 +410,16 @@ class MainWindow(QMainWindow):
 
     def _render(self, *_):
         burn = self.burn_chk.isChecked()
-        if burn and self.session.layers and self._burn_items is None:
-            # calcul lourd des parcours -> thread + dialogue de chargement
-            self.run_busy(self.session.active_items, self._burn_ready, "Aperçu brûlure…")
+        if burn and self.session.layers and self._burn_geom is None:
+            # calcul lourd (union des traits) -> thread + dialogue de chargement
+            self.run_busy(self.session.burn_geometry, self._burn_ready, "Aperçu brûlure…")
             return
-        items = self._burn_items if burn else None
-        self.canvas.render_session(self.session, toolpath_items=items,
-                                   roles=self._active_roles(),
-                                   mirror=self.session.is_mirrored(), burn=burn)
+        self.canvas.render_session(self.session, roles=self._active_roles(),
+                                   mirror=self.session.is_mirrored(), burn=burn,
+                                   burn_geom=self._burn_geom if burn else None)
 
-    def _burn_ready(self, items):
-        self._burn_items = items
+    def _burn_ready(self, geom):
+        self._burn_geom = geom
         self._render()                   # cache rempli -> rendu immédiat
 
     def preview_toolpaths(self):
@@ -470,12 +471,12 @@ class MainWindow(QMainWindow):
             self._open_project_path(f)
 
     def _open_project_path(self, f):
-        try:
-            self.session = Session.open_project(f)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "Projet", f"Échec de l'ouverture :\n{e}")
-            return
-        self._burn_items = None
+        self.run_busy(lambda: Session.open_project(f),
+                      lambda s: self._on_project_opened(s, f), "Ouverture du projet…")
+
+    def _on_project_opened(self, session, f):
+        self.session = session
+        self._burn_geom = None
         self._refresh_settings()
         self._rebuild_layers()
         self._render()
