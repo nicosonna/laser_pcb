@@ -124,19 +124,23 @@ def hatch(region: BaseGeometry, spacing: float = 0.12,
     # On travaille dans un repère où les hachures sont horizontales : on tourne la
     # surface de -angle, on coupe des lignes horizontales, puis on retourne.
     origin = region.centroid
-    work = rotate(region, -angle, origin=origin, use_radians=False)
+    work = rotate(region, -angle, origin=origin, use_radians=False) if angle else region
     minx, miny, maxx, maxy = work.bounds
 
+    # Perf : TOUTES les lignes de balayage clippées en UN seul appel GEOS
+    # (``region ∩ MultiLineString``) au lieu d'une intersection par ligne —
+    # ~30× plus rapide sur une grande carte (même optimisation que l'axe médian).
+    ys = np.arange(miny + spacing / 2.0, maxy, spacing)
+    if ys.size == 0:
+        return MultiLineString()
+    scans = MultiLineString([((minx - 1, y), (maxx + 1, y)) for y in ys])
     lines: list[LineString] = []
-    y = miny + spacing / 2.0
-    while y <= maxy:
-        scan = LineString([(minx - 1, y), (maxx + 1, y)])
-        clipped = work.intersection(scan)
-        _collect_lines(clipped, lines)
-        y += spacing
+    _collect_lines(work.intersection(scans), lines)
 
     if not lines:
         return MultiLineString()
+    if not angle:
+        return MultiLineString(lines)
     merged = rotate(MultiLineString(lines), angle, origin=origin, use_radians=False)
     if merged.geom_type == "LineString":
         return MultiLineString([merged])
@@ -275,6 +279,51 @@ def centerline_isolation(labeled: LabeledCopper, kerf: float = 0.15,
             for line, c in zip(lines, clr)]
 
 
+def text_polygons(text: str, height: float = 3.0,
+                  x: float = 0.0, y: float = 0.0) -> MultiPolygon:
+    """Texte -> polygones vectoriels (marquage gravé dans la peinture).
+
+    :param height: hauteur du texte en mm ; le coin **bas-gauche** est calé à (x, y).
+    Les trous des lettres (o, a, …) sont respectés (règle pair-impair).
+    """
+    if not text.strip() or height <= 0:
+        return MultiPolygon()
+    import functools
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextPath
+    from shapely.affinity import translate
+    tp_ = TextPath((0, 0), text, size=height,
+                   prop=FontProperties(family="DejaVu Sans", weight="bold"))
+    polys = [Polygon(arr) for arr in tp_.to_polygons() if len(arr) >= 3]
+    if not polys:
+        return MultiPolygon()
+    geom = functools.reduce(lambda a, b: a.symmetric_difference(b), polys).buffer(0)
+    minx, miny, _mx, _my = geom.bounds
+    return _as_multipolygon(translate(geom, x - minx, y - miny))
+
+
+def tight_gap_passes(labeled: LabeledCopper, kerf: float = 0.10,
+                     step: float = 0.08, width_factor: float = 2.0) -> list[Segment]:
+    """Passe **unique centrée** dans les canaux étroits (gap < ``width_factor``·kerf).
+
+    Deux régimes couverts :
+    - gap < kerf (« le gap s'inverse ») : l'anneau d'isolation fusionne les deux
+      cuivres et ne passe pas entre eux. On ignore volontairement le kerf : un
+      trait au milieu (chaque cuivre rogné d'au plus (kerf−gap)/2), sinon
+      court-circuit garanti après gravure chimique.
+    - kerf ≤ gap < 2·kerf (« ça se chevauche ») : deux anneaux passeraient mais
+      leurs traits (larges d'un kerf chacun) se recouvriraient -> un seul
+      passage centré suffit (``combined_isolation`` retire les anneaux dans ces
+      canaux via sa fermeture morphologique).
+
+    Réutilise l'axe médian net-aware (jamais de coupe à l'intérieur d'un même
+    net), filtré aux seuls tronçons plus étroits que ``width_factor``·kerf.
+    """
+    limit = width_factor * kerf
+    return [s for s in centerline_isolation(labeled, kerf=kerf, step=step)
+            if 2 * s.clearance < limit]
+
+
 def combined_isolation(labeled: LabeledCopper, board, kerf: float = 0.10,
                        tight_factor: float = 3.0, step: float = 0.08):
     """Isolation + évidement, avec **une seule passe** entre pistes/pads proches.
@@ -290,12 +339,16 @@ def combined_isolation(labeled: LabeledCopper, board, kerf: float = 0.10,
     :return: (passes_uniques: list[Segment], zone_à_évider: MultiPolygon)
     """
     union = labeled.union
-    # Contours d'isolation : chaque cuivre entièrement entouré -> séparation FIABLE
-    # (aucun court possible), coins droits.
-    rings = isolation_rings(union, kerf=kerf, rings=1)
+    # Contours d'isolation par FERMETURE morphologique : on gonfle de kerf (les
+    # canaux plus étroits que 2·kerf se referment) puis on dégonfle de kerf/2.
+    # -> l'anneau est à kerf/2 du cuivre partout où deux traits ne se
+    # chevaucheraient pas, et DISPARAÎT dans les canaux étroits (gap < 2·kerf),
+    # où ``tight_gap_passes`` fait un seul passage centré à la place.
+    liseré = union.buffer(kerf, join_style="mitre", mitre_limit=5.0)
+    closed = liseré.buffer(-kerf / 2.0, join_style="mitre", mitre_limit=5.0)
+    rings = MultiLineString(_boundaries(closed))
     # Zone à évider : le non-cuivre AU-DELÀ du liseré d'isolation (le reste du fond),
     # pour retirer l'excès de cuivre sans re-graver le bord des pistes.
-    liseré = union.buffer(kerf, join_style="mitre", mitre_limit=5.0)
     wide = board.difference(liseré)
     return rings, _as_multipolygon(wide)
 

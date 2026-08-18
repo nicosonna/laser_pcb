@@ -46,9 +46,11 @@ class StreamWorker(QThread):
 
 
 class SendPanel(QWidget):
-    def __init__(self, get_gcode: Callable[[], str]):
+    def __init__(self, get_gcode: Callable[[], str],
+                 get_frame_gcode: Callable[[], str] | None = None):
         super().__init__()
         self._get_gcode = get_gcode
+        self._get_frame_gcode = get_frame_gcode
         self.sender: GrblSender | None = None
         self.worker: StreamWorker | None = None
 
@@ -99,9 +101,15 @@ class SendPanel(QWidget):
         self.btn_pointer.toggled.connect(self._toggle_pointer)
         self.btn_setzero = QPushButton("Définir 0,0 ici"); self.btn_setzero.clicked.connect(self._set_zero)
         self.btn_gotozero = QPushButton("Aller à 0,0"); self.btn_gotozero.clicked.connect(self._goto_zero)
+        self.btn_frame = QPushButton("⬚ Cadrer (rectangle du job)")
+        self.btn_frame.setToolTip("Trace le rectangle englobant du job à faible "
+                                  "puissance pour positionner la plaque (pas le "
+                                  "'Frame' de la machine qui rejoue tout le tracé).")
+        self.btn_frame.clicked.connect(self._frame)
         og.addWidget(QLabel("Puissance pointeur"), 0, 0); og.addWidget(self.pointer_pct, 0, 1)
         og.addWidget(self.btn_pointer, 0, 2)
         og.addWidget(self.btn_setzero, 1, 0, 1, 2); og.addWidget(self.btn_gotozero, 1, 2)
+        og.addWidget(self.btn_frame, 2, 0, 1, 3)
         root.addWidget(org)
 
         # --- gravure ---
@@ -128,14 +136,14 @@ class SendPanel(QWidget):
         self.btn_connect.setText("Déconnecter" if on else "Connecter")
         for b in (self.btn_yp, self.btn_ym, self.btn_xp, self.btn_xm,
                   self.btn_home, self.btn_unlock, self.btn_send,
-                  self.btn_pointer, self.btn_setzero, self.btn_gotozero):
+                  self.btn_pointer, self.btn_setzero, self.btn_gotozero, self.btn_frame):
             b.setEnabled(on)
         self.ports.setEnabled(not on); self.baud.setEnabled(not on)
 
     def _set_streaming(self, on: bool):
         for b in (self.btn_yp, self.btn_ym, self.btn_xp, self.btn_xm,
                   self.btn_home, self.btn_unlock, self.btn_send, self.btn_connect,
-                  self.btn_pointer, self.btn_setzero, self.btn_gotozero):
+                  self.btn_pointer, self.btn_setzero, self.btn_gotozero, self.btn_frame):
             b.setEnabled(not on and (self.sender is not None or b is self.btn_connect))
         for b in (self.btn_pause, self.btn_resume, self.btn_stop):
             b.setEnabled(on)
@@ -209,6 +217,26 @@ class SendPanel(QWidget):
         if self.sender:
             self.sender.goto_zero()
             self.status.setText("Retour à 0,0")
+
+    def _frame(self):
+        """Trace le rectangle englobant du job (positionnement) via le streaming."""
+        if not self.sender or self._get_frame_gcode is None:
+            return
+        gcode = self._get_frame_gcode()
+        if not gcode.strip():
+            QMessageBox.information(self, "Cadrer", "Aucun job à cadrer (ouvrez un PCB).")
+            return
+        self.worker = StreamWorker(self.sender, gcode)
+        self.worker.progress.connect(self._on_progress)
+        self.worker.done.connect(self._on_frame_done)
+        self.worker.failed.connect(self._on_failed)
+        self._set_streaming(True)
+        self.status.setText("Cadrage…")
+        self.worker.start()
+
+    def _on_frame_done(self, res):
+        self._set_streaming(False)
+        self.status.setText("Arrêté." if res.get("stopped") else "Cadrage terminé ✔")
 
     # ---- streaming --------------------------------------------------------- #
     def start_stream(self):

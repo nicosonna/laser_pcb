@@ -197,6 +197,20 @@ def load_copper(path: str | Path, name: str | None = None) -> CopperLayer:
     return CopperLayer(name=name or path.stem, geometry=geom)
 
 
+def load_pads(path: str | Path) -> MultiPolygon:
+    """Zones de soudure d'un Gerber cuivre : les **flashs d'aperture** (pads).
+
+    Les pistes sont des tracés (Line/Arc) ; les pads sont des flashs. Sert au job
+    de finition (après perchlorure) : retirer la peinture là où l'on soude.
+    """
+    gf = GerberFile.open(str(path))
+    prims: list = []
+    for obj in gf.objects:
+        if type(obj).__name__ == "Flash":
+            prims.extend(obj.to_primitives(unit="mm"))
+    return _normalize(_objects_to_geometry(prims))
+
+
 def load_outline(path: str | Path) -> Polygon:
     """Charge le contour de carte (profile.gbr) en un polygone fermé.
 

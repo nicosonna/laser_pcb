@@ -40,6 +40,8 @@ class LayerConfig:
     power: float = 30.0            # % (juste brûler la peinture, pas le cuivre/FR4)
     adaptive: bool = True
     rings: int = 1                 # anneaux (mode isolation_offset)
+    crosshatch: bool = False       # trame croisée H+V (remplissage) : mouvement franc,
+                                   # plus précis mais ~2× plus long — à activer au besoin
 
 
 @dataclass
@@ -50,13 +52,14 @@ class Project:
     source_files: dict[str, str] = field(default_factory=dict)  # relpath -> base64
     layers: list[LayerConfig] = field(default_factory=list)
     kerf: float = 0.10                         # spot Falcon 2 22 W (~0,08–0,1 mm)
-    copper_margin: float = 0.0                 # élargit pistes/pads (laser + perchlorure) ; 0 = off (isolation nette)
+    copper_margin: float = 0.05                # marge laser : élargit pistes/pads (compense laser + perchlorure),
+                                               # plafonnée par net (jamais de pont) ; 0 = off
     origin: tuple[float, float] = (0.0, 0.0)   # position du PCB sur le plateau (mm)
     bed_width: float = 400.0                   # plateau Falcon 2 : 400 × 415 mm
     bed_height: float = 415.0
     calibration: dict = field(default_factory=dict)
-    # Perçages (gravés en contour, une face à la fois)
-    hole_enabled: bool = True
+    # Perçages (gravés en contour, une face à la fois) — désactivés par défaut
+    hole_enabled: bool = False
     hole_scale_percent: float = -30.0   # <0 rétrécit (évite de couper une piste)
     hole_speed: float = 600.0
     hole_power: float = 100.0
@@ -67,6 +70,20 @@ class Project:
     cut_outline_speed: float = 300.0     # mm/min (basse vitesse)
     cut_outline_power: float = 100.0     # %
     cut_outline_passes: int = 30
+    # Pourtour gravé AU DÉBUT du job (puissance de gravure) puis pause M0 :
+    # on marque la zone sur le martyr, on pose le PCB dedans, on reprend.
+    mark_zone_enabled: bool = False
+    # FINITION (après perchlorure) : retirer la peinture des zones à souder.
+    # Export séparé : pads (zones de soudure), trous, texte de marquage.
+    finish_pads: bool = True
+    finish_holes: bool = True
+    finish_text: str = ""
+    finish_text_height: float = 3.0     # mm
+    finish_text_x: float = 2.0          # position bas-gauche du texte (mm, repère carte)
+    finish_text_y: float = 2.0
+    finish_speed: float = 1500.0        # mm/min (retrait peinture)
+    finish_power: float = 30.0          # %
+    finish_passes: int = 1
     schema: int = SCHEMA
 
     # ---- source embarquée --------------------------------------------------- #
@@ -103,12 +120,12 @@ class Project:
             source_files=d.get("source_files", {}),
             layers=layers,
             kerf=d.get("kerf", 0.10),
-            copper_margin=d.get("copper_margin", 0.0),
+            copper_margin=d.get("copper_margin", 0.05),
             origin=tuple(d.get("origin", (0.0, 0.0))),
             bed_width=d.get("bed_width", 400.0),
             bed_height=d.get("bed_height", 415.0),
             calibration=d.get("calibration", {}),
-            hole_enabled=d.get("hole_enabled", True),
+            hole_enabled=d.get("hole_enabled", False),
             hole_scale_percent=d.get("hole_scale_percent", -30.0),
             hole_speed=d.get("hole_speed", 600.0),
             hole_power=d.get("hole_power", 100.0),
@@ -117,6 +134,16 @@ class Project:
             cut_outline_speed=d.get("cut_outline_speed", 300.0),
             cut_outline_power=d.get("cut_outline_power", 100.0),
             cut_outline_passes=d.get("cut_outline_passes", 30),
+            mark_zone_enabled=d.get("mark_zone_enabled", False),
+            finish_pads=d.get("finish_pads", True),
+            finish_holes=d.get("finish_holes", True),
+            finish_text=d.get("finish_text", ""),
+            finish_text_height=d.get("finish_text_height", 3.0),
+            finish_text_x=d.get("finish_text_x", 2.0),
+            finish_text_y=d.get("finish_text_y", 2.0),
+            finish_speed=d.get("finish_speed", 1500.0),
+            finish_power=d.get("finish_power", 30.0),
+            finish_passes=d.get("finish_passes", 1),
             schema=d.get("schema", SCHEMA),
         )
 

@@ -310,6 +310,19 @@ def load_copper(job_root: str | Path, layer: str, step: str | None = None) -> Co
     return CopperLayer(name=layer, geometry=_finalize(pos, neg))
 
 
+def load_pads(job_root: str | Path, layer: str, step: str | None = None) -> MultiPolygon:
+    """Zones de soudure d'un calque : les **pads** (records ``P`` positifs).
+
+    Sert au job de finition (après perchlorure) : retirer la peinture là où l'on
+    soude, sans toucher au reste du masque.
+    """
+    feats = _step_dir(Path(job_root), step) / "layers" / layer / "features"
+    pads = [f.geom for f in iter_features(feats)
+            if f.rec == "P" and f.polarity == "P"
+            and f.geom is not None and not f.geom.is_empty]
+    return _finalize(pads, [])
+
+
 def load_outline(job_root: str | Path, step: str | None = None) -> Polygon:
     prof = _step_dir(Path(job_root), step) / "profile"
     _, pos, neg, _ = _read_features(prof)

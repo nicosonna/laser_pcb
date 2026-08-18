@@ -30,6 +30,7 @@ class GCodeConfig:
     optimize_order: bool = True  # réordonne les parcours pour réduire les trajets
     max_optimize: int = 20000    # au-delà, on n'optimise pas (trop long)
     return_to_origin: bool = True  # G0 X0 Y0 en fin de programme
+    emit_laser_mode_setting: bool = False  # écrire "$32=1" dans le fichier (voir build)
 
 
 # --------------------------------------------------------------------------- #
@@ -154,8 +155,12 @@ class _Emitter:
 
 
 def build(items, config: GCodeConfig | None = None, passes: int = 1,
-          title: str = "laserpcb job") -> str:
-    """Construit le programme G-code complet à partir d'items (coords, feed, power)."""
+          title: str = "laserpcb job", prelude_items=None) -> str:
+    """Construit le programme G-code complet à partir d'items (coords, feed, power).
+
+    :param prelude_items: items gravés AVANT le job, suivis d'une pause ``M0``
+        (marquage du pourtour : on grave la zone, on pose le PCB, on reprend).
+    """
     config = config or GCodeConfig()
     if config.optimize_order:
         items = optimize(items, config.max_optimize)
@@ -165,9 +170,25 @@ def build(items, config: GCodeConfig | None = None, passes: int = 1,
         f"; {title}",
         "; Genere par laserpcb pour Creality Falcon 2 (GRBL)",
         "G21", "G90", "G94",              # mm, absolu, vitesse en unites/min
-        "$32=1",                          # force le mode laser (securite : tir pendant les G1 seulement)
-        f"{config.laser_mode} S0",        # arme le laser, eteint
     ]
+    # $32=1 (mode laser) est un REGLAGE MACHINE a faire UNE FOIS. Ecrit dans un
+    # fichier de job, il fait planter l'apercu/frame de nombreux streamers
+    # (LightBurn en import G-code, LaserGRBL...) -> "frame minuscule". Off par defaut.
+    if config.emit_laser_mode_setting:
+        em.lines.append("$32=1")
+    em.lines.append(f"{config.laser_mode} S0")   # arme le laser, eteint
+
+    if prelude_items:
+        # Pourtour d'abord : grave la zone ou poser le PCB, puis PAUSE (M0).
+        # L'operateur pose la plaque dans la zone marquee et appuie sur Reprendre.
+        em.lines.append("; --- pourtour : gravure de la zone du PCB ---")
+        for coords, feed, power in prelude_items:
+            em.move_rapid(*coords[0])
+            em.cut(coords, feed, power)
+        em.lines.append("M5")
+        em.lines.append("M0 ; placez le PCB dans la zone marquee puis Reprendre")
+        em.lines.append(f"{config.laser_mode} S0")
+        em._s = 0                          # forcer la re-emission de S apres la pause
     for p in range(passes):
         if passes > 1:
             em.lines.append(f"; --- passe {p + 1}/{passes} ---")
@@ -202,3 +223,38 @@ def estimate_minutes(items, passes: int = 1) -> float:
         if feed > 0:
             t += length / feed
     return t * passes
+
+
+def estimate_total_minutes(items, travel_feed: float = 3000.0,
+                           optimize_order: bool = True,
+                           max_optimize: int = 20000) -> float:
+    """Temps total approx (min) **incluant les déplacements à vide (G0)**.
+
+    Estime dans l'ordre optimisé (comme le vrai fichier) : temps de coupe
+    (longueur/vitesse) + temps de trajet entre parcours (distance/vitesse rapide)."""
+    if optimize_order:
+        items = optimize(items, max_optimize)
+    t = 0.0
+    prev = None
+    for coords, feed, _p in items:
+        if len(coords) < 2:
+            continue
+        if prev is not None and travel_feed > 0:
+            t += float(np.hypot(coords[0][0] - prev[0], coords[0][1] - prev[1])) / travel_feed
+        a = np.asarray(coords)
+        length = float(np.hypot(*(a[1:] - a[:-1]).T).sum())
+        if feed > 0:
+            t += length / feed
+        prev = coords[-1]
+    return t
+
+
+def format_duration(minutes: float) -> str:
+    """Durée lisible : « 45 s », « 12,4 min », « 1 h 23 min »."""
+    if minutes < 1:
+        return f"{minutes * 60:.0f} s"
+    h = int(minutes // 60)
+    m = minutes - h * 60
+    if h:
+        return f"{h} h {m:.0f} min"
+    return f"{m:.1f} min".replace(".", ",")

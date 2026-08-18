@@ -7,6 +7,7 @@ matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.collections import EllipseCollection, LineCollection
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D as _Line2D
 from matplotlib.patches import Circle as MplCircle, PathPatch, Rectangle
 from matplotlib.path import Path as MplPath
 from shapely.affinity import scale as _scale, translate as _translate
@@ -14,6 +15,14 @@ from shapely.geometry import LineString
 from shapely.ops import unary_union
 
 _ROLE_COLOR = {"top": "#b5651d", "bottom": "#1d6fb5"}
+
+# Couleurs de l'aperçu des parcours, par catégorie
+_KIND_COLOR = {"contour": "#1f4fd8", "fill": "#e0645a", "hole": "#0a9d3a",
+               "cut": "#ff8c00", "tight": "#d40fbf"}
+_KIND_WIDTH = {"contour": 1.1, "fill": 0.5, "hole": 0.9, "cut": 1.3, "tight": 1.6}
+_KIND_LABEL = {"contour": "tour du footprint", "fill": "remplissage",
+               "hole": "trous", "cut": "découpe contour",
+               "tight": "passe centrée (canal étroit)"}
 
 
 def _poly_path(poly):
@@ -129,9 +138,20 @@ class PcbCanvas(FigureCanvasQTAgg):
                     offset_transform=ax.transData, facecolors="white",
                     edgecolors="#333", linewidths=0.3, zorder=4))
             if toolpath_items:
-                segs = [[xp(x, y) for (x, y) in c] for c, _f, _p in toolpath_items]
-                ax.add_collection(LineCollection(segs, colors="#d81e1e",
-                                                 linewidths=0.6, zorder=5))
+                # couleur par catégorie (contour = tour du footprint, fill = remplissage…)
+                groups: dict = {}
+                for item in toolpath_items:
+                    coords = item[0]
+                    kind = item[3] if len(item) > 3 else "contour"
+                    groups.setdefault(kind, []).append([xp(x, y) for (x, y) in coords])
+                for kind, segs in groups.items():
+                    ax.add_collection(LineCollection(
+                        segs, colors=_KIND_COLOR.get(kind, "#d81e1e"),
+                        linewidths=_KIND_WIDTH.get(kind, 0.6), zorder=5))
+                handles = [_Line2D([0], [0], color=_KIND_COLOR[k], lw=2, label=lbl)
+                           for k, lbl in _KIND_LABEL.items() if k in groups]
+                if handles:
+                    ax.legend(handles=handles, loc="upper right", fontsize=7, framealpha=0.85)
 
         # vue ajustée au PCB positionné (zoomer/dézoomer pour voir tout le plateau)
         if session.board is not None and not session.board.is_empty:

@@ -167,3 +167,53 @@ def test_drc_component_aware_footprint_vs_short():
     res2 = tp.drc(features=[(1, a, "N1", "U7"), (2, b, "N2", "U8")])
     assert res2.shorts[0].kind == "short"
     assert len(res2.real_shorts) == 1 and res2.ok is False
+
+
+def test_tight_gap_passes_in_narrow_channels():
+    """Gap inversé (< kerf) OU traits qui se chevauchent (< 2·kerf) : une passe
+    unique CENTRÉE. Gap large : aucune passe (les anneaux suffisent)."""
+    board = box(-1, -1, 4, 2)
+    # deux pads séparés de 0.06 mm (< kerf 0.10) -> passe centrée à x ~ 1.03
+    a, b = box(0, 0, 1, 1), box(1.06, 0, 2.06, 1)
+    lab = LabeledCopper("t", {"A": a, "B": b}, board, has_nets=True)
+    segs = tp.tight_gap_passes(lab, kerf=0.10)
+    assert segs, "gap sous-kerf : il FAUT une passe centrée"
+    xs = [x for s in segs for (x, _y) in s.coords]
+    assert all(abs(x - 1.03) < 0.02 for x in xs)      # bien au milieu du canal
+    # gap 0.15 mm (entre kerf et 2·kerf) : deux traits se chevaucheraient -> UNE passe
+    over = LabeledCopper("t", {"A": a, "B": box(1.15, 0, 2.15, 1)}, board, has_nets=True)
+    segs = tp.tight_gap_passes(over, kerf=0.10)
+    assert segs, "chevauchement : il FAUT une passe centrée unique"
+    xs = [x for s in segs for (x, _y) in s.coords]
+    assert all(abs(x - 1.075) < 0.02 for x in xs)
+    # les mêmes pads écartés de 0.30 mm -> gap franchissable, pas de passe spéciale
+    wide = LabeledCopper("t", {"A": a, "B": box(1.30, 0, 2.30, 1)}, board, has_nets=True)
+    assert tp.tight_gap_passes(wide, kerf=0.10) == []
+
+
+def test_combined_rings_vanish_in_overlap_channels():
+    """Canal entre kerf et 2·kerf : la fermeture morpho retire les DEUX anneaux du
+    canal (un seul passage centré les remplace) ; pads isolés : anneau normal."""
+    from shapely.geometry import MultiLineString
+    board = box(-1, -1, 4, 2)
+    a, b = box(0, 0, 1, 1), box(1.15, 0, 2.15, 1)     # gap 0.15, kerf 0.10
+    lab = LabeledCopper("t", {"A": a, "B": b}, board, has_nets=True)
+    rings, _wide = tp.combined_isolation(lab, board, kerf=0.10)
+    # aucun point d'anneau à l'INTÉRIEUR du canal (x entre 1.02 et 1.13)
+    inside = [(x, y) for g in rings.geoms for (x, y) in g.coords
+              if 1.02 < x < 1.13 and 0.1 < y < 0.9]
+    assert not inside, f"anneaux résiduels dans le canal : {inside[:4]}"
+    # les bords extérieurs restent contournés (x ~ -0.05 et ~ 2.20)
+    xs = [x for g in rings.geoms for (x, _y) in g.coords]
+    assert min(xs) < 0 and max(xs) > 2.15
+
+
+def test_text_polygons_vectorized_with_letter_holes():
+    """Le texte devient des polygones (hauteur ~demandée, calé bas-gauche), et les
+    lettres à trou (O) gardent leur trou (règle pair-impair)."""
+    geom = tp.text_polygons("BO", height=4.0, x=10.0, y=20.0)
+    assert not geom.is_empty
+    minx, miny, maxx, maxy = geom.bounds
+    assert abs(minx - 10.0) < 1e-6 and abs(miny - 20.0) < 1e-6   # ancré à (x, y)
+    assert 2.0 < maxy - miny <= 5.0                              # ~hauteur demandée
+    assert any(len(p.interiors) for p in geom.geoms)             # trous des lettres

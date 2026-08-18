@@ -9,6 +9,7 @@ from __future__ import annotations
 import tarfile
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,7 @@ class Session:
     mirror_bottom: bool = True        # miroir du bottom (plaque retournée)
     _workdir: Path | None = None
     _expand_cache: dict = field(default_factory=dict)  # cache cuivre élargi
+    _pads_cache: dict = field(default_factory=dict)    # cache pads (zones de soudure)
 
     # ------------------------------------------------------------------ #
     # Détection / import de source
@@ -115,7 +117,12 @@ class Session:
         return self._expand_cache[key]
 
     def layer_items(self, layer: LoadedLayer):
-        """Renvoie les items G-code (coords, feed, power) d'un calque selon son mode.
+        """Items G-code (coords, feed, power) d'un calque — API stable (3-uplets)."""
+        return [(c, f, p) for (c, f, p, _k) in self._layer_items_tagged(layer)]
+
+    def _layer_items_tagged(self, layer: LoadedLayer):
+        """Comme ``layer_items`` mais chaque item porte une **catégorie** en 4e position
+        ("contour" = tour du footprint, "fill" = remplissage) pour l'aperçu couleur.
 
         Le cuivre est d'abord **élargi** de ``copper_margin`` (pistes/pads plus larges
         pour survivre au laser et à la gravure chimique).
@@ -128,45 +135,80 @@ class Session:
         union = base.union
 
         if cfg.mode == MODE_COMBINED:
-            rings, wide = tp.combined_isolation(base, self.board, kerf=kerf)
-            # découpe d'isolation : N passes (ablate le cuivre) ; évidement : 1 passe
-            items = gc.items_from_paths(rings, cfg.speed, cfg.power) * passes
-            if not wide.is_empty:
-                edge, interior = tp.clearing_zones(wide, union, kerf * 4)
-                items += gc.items_from_paths(tp.hatch(edge, spacing=kerf), cal.v_slow, cal.p_full)
-                items += gc.items_from_paths(tp.hatch(interior, spacing=kerf), cal.v_fast, cal.p_full)
+            # PERF multi-cœurs : shapely/scipy libèrent le GIL -> l'axe médian
+            # (passes centrées) et les remplissages tournent EN PARALLÈLE.
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                # Canaux ÉTROITS (gap < 2·kerf : gap inversé OU traits qui se
+                # chevaucheraient) : les anneaux y sont retirés (fermeture morpho)
+                # -> UN SEUL passage centré, affiché à part.
+                f_tight = ex.submit(tp.tight_gap_passes, base, kerf=kerf)
+                rings, wide = tp.combined_isolation(base, self.board, kerf=kerf)
+                # anneau de contour = LE TOUR DU FOOTPRINT (bord net, hugs cuivre),
+                # N passes ; puis évidement du fond (H+V si trame croisée).
+                items = _tag(gc.items_from_paths(rings, cfg.speed, cfg.power),
+                             "contour") * passes
+                fills = []
+                if not wide.is_empty:
+                    edge, interior = tp.clearing_zones(wide, union, kerf * 4)
+                    angles = (0.0, 90.0) if cfg.crosshatch else (0.0,)
+                    for ang in angles:
+                        fills.append((ex.submit(tp.hatch, edge, spacing=kerf, angle=ang),
+                                      cal.v_slow))
+                        fills.append((ex.submit(tp.hatch, interior, spacing=kerf, angle=ang),
+                                      cal.v_fast))
+                tight = f_tight.result()
+                if tight:
+                    paths = [tp.LineString(s.coords) for s in tight]
+                    items += _tag(gc.items_from_paths(paths, cfg.speed, cfg.power),
+                                  "tight") * passes
+                for fut, speed in fills:
+                    items += _tag(gc.items_from_paths(fut.result(), speed, cal.p_full),
+                                  "fill")
             return items
         if cfg.mode == MODE_HYBRID:
             # contours sur le cuivre élargi (base), passes centrées sur l'origine
             rings, tight = tp.hybrid_isolation(base, layer.labeled, kerf=kerf)
-            items = gc.items_from_paths(rings, cfg.speed, cfg.power)
-            items += gc.items_from_segments(tight, cal)   # passes serrées adaptatives
+            items = _tag(gc.items_from_paths(rings, cfg.speed, cfg.power), "contour")
+            items += _tag(gc.items_from_segments(tight, cal), "contour")
             return items
         if cfg.mode == MODE_CENTERLINE:
             segs = tp.centerline_isolation(base, kerf=kerf)
             if cfg.adaptive:
-                return gc.items_from_segments(segs, cal)
+                return _tag(gc.items_from_segments(segs, cal), "contour")
             paths = [tp.LineString(s.coords) for s in segs]
-            return gc.items_from_paths(paths, cfg.speed, cfg.power)
+            return _tag(gc.items_from_paths(paths, cfg.speed, cfg.power), "contour")
         if cfg.mode == MODE_ISOLATION:
             rings = tp.isolation_rings(union, kerf=kerf, rings=cfg.rings)
-            return gc.items_from_paths(rings, cfg.speed, cfg.power) * passes
+            return _tag(gc.items_from_paths(rings, cfg.speed, cfg.power), "contour") * passes
         if cfg.mode == MODE_NEGATIVE:
             copper = union
             region = tp.negative_region(copper, self.board)
             spacing = kerf
+            # Trame croisée : balayage horizontal PUIS vertical -> mouvement franc H/V,
+            # aucun contour ondulé (précis, sans oscillation), meilleur retrait peinture.
+            angles = (0.0, 90.0) if cfg.crosshatch else (0.0,)
             if cfg.adaptive:
                 # Évidement : liseré lent près des pistes, intérieur rapide au centre
-                # des grandes zones (le laser retire tout, mais va vite là où il peut).
+                # des grandes zones. Remplissages calculés en parallèle (multi-cœurs).
                 margin = spacing * 4
                 edge, interior = tp.clearing_zones(region, copper, margin)
-                items = gc.items_from_paths(tp.hatch(edge, spacing=spacing),
-                                            cal.v_slow, cal.p_full)
-                items += gc.items_from_paths(tp.hatch(interior, spacing=spacing),
-                                             cal.v_fast, cal.p_full)
+                with ThreadPoolExecutor(max_workers=8) as ex:
+                    fills = []
+                    for ang in angles:
+                        fills.append((ex.submit(tp.hatch, edge, spacing=spacing, angle=ang),
+                                      cal.v_slow))
+                        fills.append((ex.submit(tp.hatch, interior, spacing=spacing, angle=ang),
+                                      cal.v_fast))
+                    items = []
+                    for fut, speed in fills:
+                        items += _tag(gc.items_from_paths(fut.result(), speed, cal.p_full),
+                                      "fill")
                 return items
-            hatch = tp.hatch(region, spacing=spacing)
-            return gc.items_from_paths(hatch, cfg.speed, cfg.power)
+            items = []
+            for ang in angles:
+                items += _tag(gc.items_from_paths(tp.hatch(region, spacing=spacing, angle=ang),
+                                                  cfg.speed, cfg.power), "fill")
+            return items
         return []
 
     def active_layers(self) -> list[LoadedLayer]:
@@ -181,18 +223,23 @@ class Session:
         return self.active_side == "bottom" and self.mirror_bottom
 
     def active_items(self) -> list:
-        """Items G-code de la face active (cuivre + trous), NON miroités.
+        """Items G-code (coords, feed, power) de la face active — API stable (3-uplets)."""
+        return [(c, f, p) for (c, f, p, _k) in self.active_items_tagged()]
 
-        Les passes sont gérées **dans** ``layer_items`` (la découpe d'isolation est
-        répétée N fois, mais pas l'évidement raster qui ne se fait qu'en 1 passe)."""
+    def active_items_tagged(self) -> list:
+        """Items de la face active **avec catégorie** (contour / fill / hole / cut),
+        NON miroités. Sert au G-code (on ignore la catégorie) ET à l'aperçu couleur.
+
+        Les passes sont gérées **dans** ``_layer_items_tagged`` (le contour est répété
+        N fois, mais pas l'évidement raster qui ne se fait qu'en 1 passe)."""
         items = []
         for layer in self.active_layers():
             if layer.config.enabled:
-                items.extend(self.layer_items(layer))
+                items.extend(self._layer_items_tagged(layer))
         p = self.project
         if p.hole_enabled and self.holes:
             rings = tp.hole_circles(self.holes, p.hole_scale_percent)
-            hole_items = gc.items_from_paths(rings, p.hole_speed, p.hole_power)
+            hole_items = _tag(gc.items_from_paths(rings, p.hole_speed, p.hole_power), "hole")
             for _ in range(max(1, p.hole_passes)):
                 items.extend(hole_items)
         # Découpe du contour de carte (FR4), optionnelle : pleine puissance, N passes
@@ -200,26 +247,111 @@ class Session:
             from shapely.geometry import LineString
             lines = [LineString(self.board.exterior.coords)]
             lines += [LineString(r.coords) for r in self.board.interiors]
-            cut = gc.items_from_paths(lines, p.cut_outline_speed, p.cut_outline_power)
+            cut = _tag(gc.items_from_paths(lines, p.cut_outline_speed, p.cut_outline_power), "cut")
             items += cut * max(1, p.cut_outline_passes)
         return items
 
+    def estimate_minutes(self, items=None) -> float:
+        """Durée de gravure estimée (min) de la face active, trajets à vide inclus.
+        ``items`` permet de réutiliser un calcul de parcours déjà fait (évite un
+        recalcul lourd)."""
+        items = self.active_items() if items is None else items
+        return gc.estimate_total_minutes(items)
+
+    # ------------------------------------------------------------------ #
+    # Finition (après perchlorure) : pads + trous + texte
+    # ------------------------------------------------------------------ #
+    def pads_for(self, role: str):
+        """Zones de soudure (pads) de la face ``role`` — chargées à la demande."""
+        from shapely.geometry import MultiPolygon
+        if role in self._pads_cache:
+            return self._pads_cache[role]
+        geom = MultiPolygon()
+        root = self.source_root
+        try:
+            if root is not None:
+                if self.project.source_kind == "gerber":
+                    gdir = root if list(root.glob("*.gbr")) else root / "GerberFiles"
+                    f = _first(gdir, [f"*opper_{role}*.gbr", f"*{role}*.gbr"])
+                    if f:
+                        geom = geo.load_pads(f)
+                else:
+                    geom = odb.load_pads(root, role)
+        except Exception:
+            pass                                   # pas de pads -> finition trous/texte
+        self._pads_cache[role] = geom
+        return geom
+
+    def finish_items_tagged(self) -> list:
+        """Job de FINITION (après perchlorure) : retirer la peinture des zones de
+        soudure (pads), des trous, et graver un texte — face active, non miroité.
+
+        Chaque zone est détourée (bord net) puis remplie (hachures au pas du kerf)."""
+        p = self.project
+        kerf = p.kerf
+        items = []
+        fill_geoms = []
+        if p.finish_pads:
+            pads = self.pads_for(self.active_side)
+            if pads is not None and not pads.is_empty:
+                fill_geoms.append(pads)
+        if p.finish_text.strip():
+            txt = tp.text_polygons(p.finish_text, p.finish_text_height,
+                                   p.finish_text_x, p.finish_text_y)
+            if not txt.is_empty:
+                fill_geoms.append(txt)
+        for geom in fill_geoms:
+            rings = [tp.LineString(r.coords)
+                     for poly in getattr(geom, "geoms", [geom])
+                     for r in [poly.exterior, *poly.interiors]]
+            items += _tag(gc.items_from_paths(rings, p.finish_speed, p.finish_power),
+                          "contour")
+            items += _tag(gc.items_from_paths(tp.hatch(geom, spacing=kerf),
+                                              p.finish_speed, p.finish_power), "fill")
+        if p.finish_holes and self.holes:
+            circles = tp.hole_circles(self.holes, p.hole_scale_percent)
+            items += _tag(gc.items_from_paths(circles, p.hole_speed, p.hole_power),
+                          "hole")
+        return items * max(1, p.finish_passes)
+
+    def generate_finish_gcode(self, config: gc.GCodeConfig | None = None) -> str:
+        """G-code de finition (face active, miroir/offset comme la gravure)."""
+        items = [(c, f, pw) for (c, f, pw, _k) in self.finish_items_tagged()]
+        placed = self.placed_items(items)
+        title = f"{self.project.name}_{self.active_side}_finition"
+        return gc.build(placed, config or gc.GCodeConfig(), title=title)
+
     def burn_geometry(self):
         """Géométrie de la zone gravée (union des traits épaissis du kerf) — calcul
-        lourd, à lancer dans un thread (pas dans le rendu qui est sur la GUI)."""
+        lourd, à lancer dans un thread (pas dans le rendu qui est sur la GUI).
+
+        Perf grands PCB : buffer **vectorisé** (un appel C pour tous les traits) puis
+        union **hiérarchique en parallèle** (multi-cœurs, shapely libère le GIL)."""
+        import numpy as np
+        import shapely
         from shapely.geometry import LineString
         from shapely.ops import unary_union
-        strokes = [LineString(c).buffer(self.project.kerf / 2, cap_style="round")
-                   for c, _f, _p in self.active_items() if len(c) >= 2]
-        return unary_union(strokes) if strokes else None
+        coords = [c for c, _f, _p in self.active_items() if len(c) >= 2]
+        if not coords:
+            return None
+        lines = np.empty(len(coords), dtype=object)
+        lines[:] = [LineString(c) for c in coords]
+        # quad_segs=3 : capuchons grossiers (rayon kerf/2 ~ 0,05 mm -> invisible),
+        # 2-3× moins de sommets à unioner.
+        strokes = shapely.buffer(lines, self.project.kerf / 2,
+                                 cap_style="round", quad_segs=3)
+        # union par morceaux en parallèle, puis union finale (le meilleur mesuré :
+        # 50 s -> 27 s sur solar_pi ; un arbre de fusion complet est CONTRE-productif)
+        parts = [strokes[i:i + 2000] for i in range(0, len(strokes), 2000)]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            partials = list(ex.map(unary_union, parts))
+        return unary_union(partials)
 
-    def generate_gcode(self, config: gc.GCodeConfig | None = None) -> str:
-        """G-code absolu de la **face active** : miroir (bottom) puis offset plateau.
-
-        Le G-code est en G90 (absolu) depuis l'origine de travail réglée sur la
-        machine ; ``project.origin`` positionne le PCB sur le plateau.
-        """
-        items = self.active_items()
+    def placed_items(self, items=None) -> list:
+        """``active_items`` **placés** : miroir (bottom) puis offset plateau — c.-à-d.
+        les coordonnées machine réelles envoyées à la graveuse. ``items`` réutilise
+        un calcul déjà fait (sinon recalcule ``active_items``)."""
+        items = self.active_items() if items is None else items
         if self.is_mirrored() and self.board is not None:
             cx = self.board_center_x()
             items = [([(2 * cx - x, y) for (x, y) in coords], f, pw)
@@ -228,8 +360,68 @@ class Session:
         if ox or oy:
             items = [([(x + ox, y + oy) for (x, y) in coords], f, pw)
                      for coords, f, pw in items]
+        return items
+
+    def job_bounds(self) -> tuple[float, float, float, float] | None:
+        """Rectangle englobant (minx, miny, maxx, maxy) du job placé, ou None."""
+        xs, ys = [], []
+        for coords, _f, _p in self.placed_items():
+            for x, y in coords:
+                xs.append(x); ys.append(y)
+        if not xs:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def frame_gcode(self, power: float = 1.0, feed: float = 3000.0,
+                    loops: int = 2, max_s: int = 1000) -> str:
+        """G-code de **cadrage** : trace le rectangle englobant du job à faible
+        puissance (visible mais sans graver), pour positionner la plaque.
+
+        Contrairement au bouton « Frame » de la machine — qui, sur un parcours
+        vectoriel, rejoue tout le tracé — ceci ne fait QUE les 4 coins."""
+        b = self.job_bounds()
+        if b is None:
+            return ""
+        minx, miny, maxx, maxy = b
+        s = int(round(max(0.0, power) / 100.0 * max_s))
+        corners = [(maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)]
+        lines = [
+            f"; cadre {self.project.name}_{self.active_side} "
+            f"({maxx - minx:.1f} x {maxy - miny:.1f} mm) — positionnement",
+            "G21", "G90", "G94",
+            "M3 S0",                                   # constant : point visible en mouvement
+            f"G0 X{minx:.3f} Y{miny:.3f}",
+        ]
+        for _ in range(max(1, loops)):
+            for x, y in corners:
+                lines.append(f"G1 X{x:.3f} Y{y:.3f} F{feed:.0f} S{s}")
+        lines += ["M5", "M2"]
+        return "\n".join(lines) + "\n"
+
+    def generate_gcode(self, config: gc.GCodeConfig | None = None, items=None) -> str:
+        """G-code absolu de la **face active** : miroir (bottom) puis offset plateau.
+
+        Le G-code est en G90 (absolu) depuis l'origine de travail réglée sur la
+        machine ; ``project.origin`` positionne le PCB sur le plateau. ``items``
+        réutilise un ``active_items`` déjà calculé (évite un recalcul lourd).
+        """
+        placed = self.placed_items(items)
         title = f"{self.project.name}_{self.active_side}"
-        return gc.build(items, config or gc.GCodeConfig(), title=title)
+        prelude = None
+        if self.project.mark_zone_enabled and self.board is not None:
+            # Pourtour à puissance de GRAVURE (celle du calque actif) : marque sur le
+            # support l'emprise de la CARTE (pas des parcours) — c'est là que la
+            # plaque se pose — puis pause M0 (poser la plaque, reprendre).
+            minx, miny, maxx, maxy = self.board.bounds   # miroir : emprise inchangée
+            ox, oy = self.project.origin
+            minx, maxx, miny, maxy = minx + ox, maxx + ox, miny + oy, maxy + oy
+            rect = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)]
+            lay = next((l for l in self.active_layers() if l.config.enabled), None)
+            speed = lay.config.speed if lay else 1500.0
+            power = lay.config.power if lay else 30.0
+            prelude = [(rect, speed, power)]
+        return gc.build(placed, config or gc.GCodeConfig(), title=title,
+                        prelude_items=prelude)
 
     def center_on_bed(self) -> None:
         """Positionne le PCB au centre du plateau (règle ``project.origin``)."""
@@ -267,6 +459,11 @@ class Session:
             if layer.config.name in saved:
                 layer.config = saved[layer.config.name]
         return s
+
+
+def _tag(items, kind: str) -> list:
+    """Ajoute une catégorie ("contour"/"fill"/"hole"/"cut") à des items (coords,f,p)."""
+    return [(c, f, p, kind) for (c, f, p) in items]
 
 
 def _extract_archive(path: Path) -> Path:

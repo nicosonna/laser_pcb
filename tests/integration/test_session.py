@@ -115,6 +115,50 @@ def test_combined_is_default_and_generates():
     assert "M4 S0" in g and g.rstrip().endswith("M2")
 
 
+def test_frame_gcode_traces_only_bounding_rectangle():
+    """Le cadre ne fait QUE le rectangle englobant (4 coins), pas tout le tracé,
+    et à faible puissance — sinon le 'Frame' machine rejoue toute la gravure."""
+    import re
+    s = Session()
+    s.import_source(GERBER)
+    _iso(s)
+    frame = s.frame_gcode(power=1.0, loops=2)
+    cuts = [l for l in frame.splitlines() if l.startswith("G1")]
+    assert len(cuts) == 8                     # 4 coins x 2 boucles
+    minx, miny, maxx, maxy = s.job_bounds()
+    xs = {round(float(re.search(r"X(-?[\d.]+)", l).group(1)), 1) for l in cuts}
+    ys = {round(float(re.search(r"Y(-?[\d.]+)", l).group(1)), 1) for l in cuts}
+    assert xs == {round(minx, 1), round(maxx, 1)}   # que les bords
+    assert ys == {round(miny, 1), round(maxy, 1)}
+    powers = {int(re.search(r"S(\d+)", l).group(1)) for l in cuts}
+    assert powers == {10}                     # 1% -> S10, ne grave pas
+    # bien plus court que la gravure complète
+    assert len(cuts) < len(s.generate_gcode().splitlines())
+
+
+def test_mark_zone_engraves_rectangle_then_pauses():
+    """Option pourtour : le job commence par le rectangle de la zone (puissance de
+    gravure du calque) puis PAUSE M0 (poser le PCB) ; désactivée -> pas de M0."""
+    import re
+    s = Session()
+    s.import_source(GERBER)
+    _iso(s)
+    s.project.mark_zone_enabled = True
+    g = s.generate_gcode()
+    assert "M0" in g
+    body = g.splitlines()
+    i_pause = next(i for i, l in enumerate(body) if l.startswith("M0"))
+    prelude = "\n".join(body[:i_pause])
+    assert "pourtour" in prelude                     # marquage avant la pause
+    # le rectangle utilise la puissance de GRAVURE du calque (pas 1 % de cadrage)
+    pw = s.active_layers()[0].config.power
+    assert f"S{int(pw * 10)}" in prelude             # p.ex. 30 % -> S300
+    # 4 coins du rectangle avant la pause
+    assert len(re.findall(r"G1 X", prelude)) >= 4
+    s.project.mark_zone_enabled = False
+    assert "M0" not in s.generate_gcode()
+
+
 def test_holes_add_lines_to_gcode():
     s = Session()
     s.import_source(ODBPP)
@@ -140,3 +184,21 @@ def test_session_project_roundtrip(tmp_path):
     assert any(l.config.power == 42.0 for l in s2.layers)
     # source embarquée -> géométrie reconstruite
     assert s2.board.bounds[2] > 79
+
+
+def test_finish_job_exports_pads_holes_text():
+    """Finition (après perchlorure) : pads + trous + texte -> G-code séparé."""
+    from laserpcb import odb
+    s = Session()
+    s.import_source(ODBPP)
+    pads = odb.load_pads(s.source_root, "top")
+    assert not pads.is_empty                       # l'ODB++ fournit bien les pads
+    s.project.finish_text = "TEST"
+    g = s.generate_finish_gcode()
+    assert "_finition" in g.splitlines()[0]
+    assert "G1" in g and g.rstrip().endswith("M2")
+    # sans pads ni trous ni texte -> quasi vide (pas de G1)
+    s.project.finish_pads = False
+    s.project.finish_holes = False
+    s.project.finish_text = ""
+    assert "G1" not in s.generate_finish_gcode()
