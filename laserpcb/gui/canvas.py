@@ -78,7 +78,7 @@ class PcbCanvas(FigureCanvasQTAgg):
         self.draw_idle()
 
     def render_session(self, session, toolpath_items=None, roles=None,
-                       mirror=False, burn=False, burn_geom=None):
+                       mirror=False, burn=False, burn_geom=None, burn_edges=False):
         ax = self.ax
         ax.clear()
         ax.set_aspect("equal")
@@ -116,6 +116,20 @@ class PcbCanvas(FigureCanvasQTAgg):
                 path = _compound_path(getattr(merged, "geoms", [merged]), tol=0.02)
                 if path is not None:
                     ax.add_patch(PathPatch(path, facecolor="black", edgecolor="none", zorder=3))
+            if burn_edges:
+                # Bords du cuivre D'ORIGINE en rouge : on voit d'un coup d'œil si la
+                # brûlure sépare bien deux cuivres (le noir doit être continu entre eux).
+                for layer in session.layers:
+                    if not layer.config.enabled:
+                        continue
+                    if roles is not None and layer.config.role not in roles:
+                        continue
+                    u = xf(layer.labeled.union)
+                    path = _compound_path(getattr(u, "geoms", [u]), tol=0.02)
+                    if path is not None:
+                        ax.add_patch(PathPatch(path, facecolor="none",
+                                               edgecolor="#d81e1e", linewidth=0.7,
+                                               zorder=4))
         else:
             for layer in session.layers:
                 if not layer.config.enabled:

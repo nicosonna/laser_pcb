@@ -217,3 +217,38 @@ def test_text_polygons_vectorized_with_letter_holes():
     assert abs(minx - 10.0) < 1e-6 and abs(miny - 20.0) < 1e-6   # ancré à (x, y)
     assert 2.0 < maxy - miny <= 5.0                              # ~hauteur demandée
     assert any(len(p.interiors) for p in geom.geoms)             # trous des lettres
+
+
+def test_expand_preserves_narrow_channels_even_same_net():
+    """Règle de marge : un canal plus fin que kerf+2·marge reste INTACT — entre
+    nets ET dans un même net (dégagement thermique) ; ailleurs, marge pleine."""
+    board = box(-2, -2, 12, 4)
+    # même net : deux blocs reliés par un pont, fossé de 0.15 mm entre eux
+    a = unary_union([box(0, 0, 2, 2), box(2.15, 0, 4.15, 2), box(1.9, 0.9, 2.3, 1.1)])
+    # autre net, loin (> kerf+2m) : prendra la marge pleine
+    b = box(8, 0, 10, 2)
+    lab = LabeledCopper("t", {"A": a, "B": b}, board, has_nets=True)
+    exp = tp.expand_copper(lab, margin=0.06, min_gap=0.10)
+    # le fossé intra-net (0.15 < 0.10+0.12) n'est PAS rempli
+    moat = box(2.05, 1.3, 2.10, 1.9)         # au coeur du fossé, au-dessus du pont
+    assert exp.union.intersection(moat).area < 1e-9
+    # ...mais B, dégagé, a bien pris la marge pleine des deux côtés
+    minx, _y0, maxx, _y1 = exp.net_geoms["B"].bounds
+    assert abs((maxx - minx) - (2 + 2 * 0.06)) < 0.01
+    # et jamais plus petit que l'origine
+    assert exp.net_geoms["A"].contains(a.buffer(-1e-9))
+
+
+def test_hatch_outline_closes_edge_bands():
+    """Sans contour, la dernière ligne de balayage peut s'arrêter jusqu'à
+    spacing/2 avant le bord -> bande non gravée (= lamelle de cuivre résiduelle).
+    Avec ``outline=True`` le bord est toujours parcouru."""
+    region = box(0, 0, 5, 5.35)          # hauteur non multiple du pas
+    plain = tp.hatch(region, spacing=0.5, angle=0.0)
+    with_out = tp.hatch(region, spacing=0.5, angle=0.0, outline=True)
+    assert len(with_out.geoms) == len(plain.geoms) + 1        # + le contour
+    # le bord haut (y = 5.35) n'est atteint QUE via le contour
+    top_plain = max(y for g in plain.geoms for (_x, y) in g.coords)
+    top_out = max(y for g in with_out.geoms for (_x, y) in g.coords)
+    assert 0.05 < 5.35 - top_plain <= 0.5 / 2     # bande non balayée (< spacing/2)
+    assert abs(top_out - 5.35) < 1e-9             # le contour atteint le bord pile

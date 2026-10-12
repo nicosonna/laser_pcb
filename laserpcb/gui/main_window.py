@@ -157,6 +157,19 @@ class MainWindow(QMainWindow):
         self.burn_chk = QCheckBox("Aperçu brûlure (noir)")
         self.burn_chk.stateChanged.connect(self._render)
         tb.addWidget(self.burn_chk)
+        self.burn_edges_chk = QCheckBox("+ bords cuivre (rouge)")
+        self.burn_edges_chk.setChecked(True)
+        self.burn_edges_chk.setToolTip("Superpose les bords du cuivre d'origine sur "
+                                       "l'aperçu brûlure : entre deux cuivres différents, "
+                                       "le noir doit former une ligne continue.")
+        self.burn_edges_chk.stateChanged.connect(self._render)
+        tb.addWidget(self.burn_edges_chk)
+        tb.addSeparator()
+        btn_bom = QPushButton("📋 BOM")
+        btn_bom.setToolTip("Nomenclature des composants (ODB++) : tableau + export "
+                           "CSV / HTML.")
+        btn_bom.clicked.connect(self.show_bom)
+        tb.addWidget(btn_bom)
         tb.addSeparator()
         self._time_label = QLabel("  ⏱ —  ")
         self._time_label.setToolTip("Durée de gravure estimée de la face active "
@@ -193,6 +206,17 @@ class MainWindow(QMainWindow):
         self.margin.setValue(self.session.project.copper_margin); self.margin.setSuffix(" mm")
         self.margin.valueChanged.connect(self._on_margin)
         kf.addRow("Marge cuivre (laser+chimie)", self.margin)
+        self.simplify = QDoubleSpinBox(); self.simplify.setRange(0.0, 0.1)
+        self.simplify.setDecimals(4); self.simplify.setSingleStep(0.001)
+        self.simplify.setValue(self.session.project.simplify_tolerance)
+        self.simplify.setSuffix(" mm")
+        self.simplify.setToolTip(
+            "Simplification des tracés avant écriture du G-code (Douglas-Peucker). "
+            "0,006 mm = un demi-pas moteur : la machine ne sait pas exécuter plus "
+            "fin, et trop de micro-segments la font hésiter. 0 = désactivé.")
+        self.simplify.valueChanged.connect(
+            lambda v: setattr(self.session.project, "simplify_tolerance", v))
+        kf.addRow("Simplification tracés", self.simplify)
         self._panel_layout.addWidget(kerf_box)
 
         # --- Trous (réglages liés dynamiquement à la session courante) ---
@@ -236,9 +260,16 @@ class MainWindow(QMainWindow):
         self.cut_passes = QSpinBox(); self.cut_passes.setRange(1, 100)
         self.cut_passes.setValue(p.cut_outline_passes)
         self.cut_passes.valueChanged.connect(lambda v: self._set_proj("cut_outline_passes", v))
+        self.cut_margin = QDoubleSpinBox(); self.cut_margin.setRange(0, 20)
+        self.cut_margin.setSingleStep(0.5); self.cut_margin.setValue(p.cut_outline_margin)
+        self.cut_margin.setSuffix(" mm")
+        self.cut_margin.setToolTip("FR4 conservé autour du circuit : la découpe passe "
+                                   "à cette distance du bord de la carte.")
+        self.cut_margin.valueChanged.connect(lambda v: self._set_proj("cut_outline_margin", v))
         cf.addRow("Vitesse", self.cut_speed)
         cf.addRow("Puissance", self.cut_power)
         cf.addRow("Passes", self.cut_passes)
+        cf.addRow("Marge du pourtour", self.cut_margin)
         self._cut_box = cut_box
         self._panel_layout.addWidget(cut_box)
 
@@ -246,7 +277,10 @@ class MainWindow(QMainWindow):
         fin_box = QGroupBox("Finition (après perchlorure)")
         fin_box.setToolTip("Job séparé : retire la PEINTURE restante là où l'on soude "
                            "(pads), aux trous, et grave un texte de marquage. À lancer "
-                           "après le bain de perchlorure, plaque remise au même endroit.")
+                           "après le bain de perchlorure.\n"
+                           "Découpe du pourtour ACTIVE : définir 0,0 sur le COIN "
+                           "bas-gauche de la plaque découpée (la marge est intégrée). "
+                           "Sinon : même zéro machine que la gravure.")
         ff = QFormLayout(fin_box)
         self.fin_pads = QCheckBox("Zones de soudure (pads)")
         self.fin_pads.setChecked(p.finish_pads)
@@ -275,17 +309,48 @@ class MainWindow(QMainWindow):
         self.fin_passes = QSpinBox(); self.fin_passes.setRange(1, 20)
         self.fin_passes.setValue(p.finish_passes)
         self.fin_passes.valueChanged.connect(lambda v: setattr(self.session.project, "finish_passes", v))
+        self.fin_inset = QDoubleSpinBox(); self.fin_inset.setRange(0, 0.5)
+        self.fin_inset.setSingleStep(0.01); self.fin_inset.setValue(p.finish_pads_inset)
+        self.fin_inset.setSuffix(" mm")
+        self.fin_inset.setToolTip("Rétrécit les pads avant de dénuder : la peinture "
+                                  "est retirée STRICTEMENT sur le cuivre.")
+        self.fin_inset.valueChanged.connect(lambda v: setattr(self.session.project, "finish_pads_inset", v))
+        self.fin_hole_passes = QSpinBox(); self.fin_hole_passes.setRange(1, 100)
+        self.fin_hole_passes.setValue(p.finish_hole_passes)
+        self.fin_hole_passes.setToolTip("Perçage laser : passes pleines sur chaque trou "
+                                        "(vitesse/puissance du groupe Trous).")
+        self.fin_hole_passes.valueChanged.connect(lambda v: setattr(self.session.project, "finish_hole_passes", v))
+        self.fin_plate_ref = QCheckBox("Repère = coin de la plaque découpée (+marge)")
+        self.fin_plate_ref.setToolTip(
+            "Coché : la finition est exprimée depuis le COIN bas-gauche de la plaque "
+            "déjà découpée (définir 0,0 dessus après le bain) — l'origine plateau est "
+            "ignorée.\nDécoché (défaut) : même zéro machine que la gravure, le "
+            "centrage plateau est suivi.")
+        self.fin_plate_ref.setChecked(p.finish_ref_plate_corner)
+        self.fin_plate_ref.toggled.connect(
+            lambda on: setattr(self.session.project, "finish_ref_plate_corner", on))
+        self.fin_cut = QCheckBox("Découpe du contour en fin de finition")
+        self.fin_cut.setToolTip("Coupe le pourtour (réglages du groupe Découpe contour) "
+                                "À LA FIN de la finition. Dans ce cas la finition garde "
+                                "le même zéro machine que la gravure — n'activez pas "
+                                "aussi la découpe du job principal.")
+        self.fin_cut.setChecked(p.finish_cut_enabled)
+        self.fin_cut.toggled.connect(lambda on: setattr(self.session.project, "finish_cut_enabled", on))
         self.btn_finish = QPushButton("Exporter G-code finition…")
         self.btn_finish.clicked.connect(self.export_finish)
         ff.addRow(self.fin_pads)
+        ff.addRow("Retrait pads", self.fin_inset)
         ff.addRow(self.fin_holes)
+        ff.addRow("Passes trous (perçage)", self.fin_hole_passes)
         ff.addRow("Texte", self.fin_text)
         ff.addRow("Hauteur texte", self.fin_text_h)
         ff.addRow("Texte X", self.fin_text_x)
         ff.addRow("Texte Y", self.fin_text_y)
-        ff.addRow("Vitesse", self.fin_speed)
-        ff.addRow("Puissance", self.fin_power)
-        ff.addRow("Passes", self.fin_passes)
+        ff.addRow("Vitesse peinture", self.fin_speed)
+        ff.addRow("Puissance peinture", self.fin_power)
+        ff.addRow("Passes peinture", self.fin_passes)
+        ff.addRow(self.fin_plate_ref)
+        ff.addRow(self.fin_cut)
         ff.addRow(self.btn_finish)
         self._fin_box = fin_box
         self._panel_layout.addWidget(fin_box)
@@ -344,6 +409,7 @@ class MainWindow(QMainWindow):
         m.addAction("Enregistrer le projet…", self.save_project)
         m.addAction("Exporter le G-code (face active)…", self.export_gcode)
         m.addAction("Exporter la finition (pads/trous/texte)…", self.export_finish)
+        m.addAction("Nomenclature (BOM)…", self.show_bom)
         m.addSeparator()
         m.addAction("Quitter", self.close)
 
@@ -399,6 +465,12 @@ class MainWindow(QMainWindow):
         for spin, val in ((self.org_x, ox), (self.org_y, oy)):
             spin.blockSignals(True); spin.setValue(val); spin.blockSignals(False)
         self._render()
+        if not self.session.fits_on_bed():
+            b = self.session.plate_bounds()
+            self.statusBar().showMessage(
+                f"⚠ Plaque (carte + marge de découpe) trop grande pour le plateau : "
+                f"{b[2] - b[0]:.0f} × {b[3] - b[1]:.0f} mm — la découpe sortirait "
+                f"de la zone de travail.")
 
     def open_file(self):
         """Ouvre un fichier : archive PCB (ZIP/TGZ/TAR) ou projet .lpcb (auto)."""
@@ -423,15 +495,18 @@ class MainWindow(QMainWindow):
         p = self.session.project
         pairs = [
             (self.kerf, p.kerf), (self.margin, p.copper_margin),
+            (self.simplify, p.simplify_tolerance),
             (self.hole_pct, p.hole_scale_percent),
             (self.hole_speed, p.hole_speed), (self.hole_power, p.hole_power),
             (self.hole_passes, p.hole_passes), (self.bed_w, p.bed_width),
             (self.bed_h, p.bed_height), (self.org_x, p.origin[0]), (self.org_y, p.origin[1]),
             (self.cut_speed, p.cut_outline_speed), (self.cut_power, p.cut_outline_power),
-            (self.cut_passes, p.cut_outline_passes),
+            (self.cut_passes, p.cut_outline_passes), (self.cut_margin, p.cut_outline_margin),
             (self.fin_text_h, p.finish_text_height), (self.fin_text_x, p.finish_text_x),
             (self.fin_text_y, p.finish_text_y), (self.fin_speed, p.finish_speed),
             (self.fin_power, p.finish_power), (self.fin_passes, p.finish_passes),
+            (self.fin_inset, p.finish_pads_inset),
+            (self.fin_hole_passes, p.finish_hole_passes),
         ]
         for widget, val in pairs:
             widget.blockSignals(True); widget.setValue(val); widget.blockSignals(False)
@@ -440,6 +515,8 @@ class MainWindow(QMainWindow):
                               (self.mark_chk, p.mark_zone_enabled),
                               (self.fin_pads, p.finish_pads),
                               (self.fin_holes, p.finish_holes),
+                              (self.fin_cut, p.finish_cut_enabled),
+                              (self.fin_plate_ref, p.finish_ref_plate_corner),
                               (self.mirror, self.session.mirror_bottom)):
             widget.blockSignals(True); widget.setChecked(state); widget.blockSignals(False)
         self.fin_text.blockSignals(True)
@@ -508,7 +585,8 @@ class MainWindow(QMainWindow):
             return
         self.canvas.render_session(self.session, roles=self._active_roles(),
                                    mirror=self.session.is_mirrored(), burn=burn,
-                                   burn_geom=self._burn_geom if burn else None)
+                                   burn_geom=self._burn_geom if burn else None,
+                                   burn_edges=self.burn_edges_chk.isChecked())
 
     def _burn_ready(self, geom):
         self._burn_geom = geom
@@ -549,20 +627,55 @@ class MainWindow(QMainWindow):
         if not f:
             return
         def compute():
-            items = self.session.active_items()          # calculé une seule fois
-            return (self.session.generate_gcode(items=items),
-                    self.session.estimate_minutes(items))
+            tagged = self.session.active_items_tagged()  # calculé une seule fois
+            plain = [(c, f, p) for (c, f, p, _k) in tagged]
+            st = {}
+            prog = self.session.generate_gcode(items=tagged, stats=st)
+            return prog, self.session.estimate_minutes(plain), st
         self.run_busy(compute, lambda r: self._write_gcode(f, r, side),
                       "Génération du G-code…")
 
     def _write_gcode(self, path, result, side):
-        prog, minutes = result
+        prog, minutes, st = result
         Path(path).write_text(prog, encoding="utf-8")
         from .. import gcode as gc
         self._time_label.setText(f"  ⏱ {gc.format_duration(minutes)}  ")
         self.statusBar().showMessage(
-            f"G-code face {side} écrit : {path} ({len(prog.splitlines())} lignes, "
-            f"~{gc.format_duration(minutes)} de gravure)")
+            f"G-code face {side} : {path} — {st['lines']} lignes, "
+            f"segments {st['segments_before']} → {st['segments_after']}, "
+            f"gravé {st['length_before_mm']/1000:.2f} m → "
+            f"{st['length_after_mm']/1000:.2f} m, plus petit segment "
+            f"{st['shortest_mm']:.4f} mm, ~{gc.format_duration(minutes)}")
+        if 0 < st["shortest_mm"] < 0.01:
+            QMessageBox.warning(
+                self, "G-code",
+                f"Le plus petit segment gravé fait {st['shortest_mm']:.4f} mm, "
+                f"sous 0,01 mm.{chr(10)}{chr(10)}La machine ne sait pas exécuter "
+                "des segments aussi fins : elle risque d'hésiter. Augmentez "
+                "« Simplification tracés » dans le groupe Général.")
+
+    def show_bom(self):
+        """Affiche la nomenclature des composants (source ODB++ uniquement)."""
+        if self.session.source_root is None:
+            QMessageBox.information(self, "BOM", "Ouvrez d'abord un PCB.")
+            return
+        if self.session.project.source_kind != "odbpp":
+            QMessageBox.information(
+                self, "BOM",
+                "Les Gerber ne contiennent pas les composants.\n"
+                "La nomenclature nécessite une source ODB++ (export Fusion).")
+            return
+        from .. import bom
+        from .bom_dialog import BomDialog
+        try:
+            comps = bom.load_components(self.session.source_root)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "BOM", f"Lecture impossible :\n{e}")
+            return
+        if not comps:
+            QMessageBox.information(self, "BOM", "Aucun composant trouvé dans l'ODB++.")
+            return
+        BomDialog(bom.aggregate(comps), self.session.project.name, self).exec()
 
     def export_finish(self):
         """Exporte le G-code de finition (pads / trous / texte, après perchlorure)."""
@@ -586,8 +699,12 @@ class MainWindow(QMainWindow):
                                     "Rien à graver (pads/trous/texte vides ?).")
             return
         Path(path).write_text(prog, encoding="utf-8")
+        p = self.session.project
+        ref = (" — repère : 0,0 = COIN de la plaque découpée"
+               if p.finish_ref_plate_corner and p.cut_outline_margin > 0
+               and not p.finish_cut_enabled else "")
         self.statusBar().showMessage(
-            f"Finition face {side} écrite : {path} ({len(prog.splitlines())} lignes)")
+            f"Finition face {side} écrite : {path} ({len(prog.splitlines())} lignes){ref}")
 
     def export_frame(self):
         """Exporte le G-code de cadrage (rectangle du job, faible puissance)."""

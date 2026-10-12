@@ -60,9 +60,68 @@ def test_boustrophedon_orders_into_bands():
     # ordre initial volontairement dispersé (par colonnes)
     items = [([(x, y), (x + 0.5, y)], 600, 100)
              for x in range(20) for y in range(20)]
-    ordered = gc.optimize(items, max_nn=0, band=2.0)   # force le mode serpentin
+    ordered = gc._boustrophedon(items, 2.0)             # serpentin seul (bande fixée)
     bands = [int(it[0][0][1] // 2.0) for it in ordered]
     assert bands == sorted(bands)                       # bandes non décroissantes
-    # au sein d'une bande, le sens X alterne (serpentin) : bande 0 croissante
-    band0_x = [it[0][0][0] for it in ordered if int(it[0][0][1] // 2.0) == 0]
-    assert band0_x == sorted(band0_x)
+    # au sein d'une bande, on progresse en X sans revenir en arrière — mesuré sur
+    # l'ÉTENDUE du parcours (chaque tronçon peut être retourné par l'orientation)
+    band0 = [it[0] for it in ordered if int(it[0][0][1] // 2.0) == 0]
+    lefts = [min(p[0] for p in c) for c in band0]
+    assert lefts == sorted(lefts)
+    # et le serpentin réduit nettement les trajets face à l'ordre dispersé
+    assert gc._travel_length(ordered) < gc._travel_length(items) * 0.7
+
+
+def test_optimize_orients_paths_and_cuts_travel():
+    """Le serpentin doit RETOURNER les parcours selon le point courant : sans ça,
+    dans une bande parcourue à rebours on saute la longueur de chaque segment."""
+    # 40 lignes horizontales empilées : le trajet idéal = ~0 (serpentin parfait)
+    items = [([(0.0, i * 0.1), (5.0, i * 0.1)], 1000, 50) for i in range(40)]
+    opt = gc.optimize(items, max_nn=0)          # force le serpentin
+    travel = gc._travel_length(opt)
+    assert travel < 5.0                          # avant le fix : ~195 mm
+    assert len(opt) == len(items)                # aucun parcours perdu
+    # chaque ligne est bien gravée entière (longueur conservée)
+    assert abs(gc.cut_length(opt) - gc.cut_length(items)) < 1e-9
+
+
+def test_simplify_stays_within_tolerance_and_drops_no_geometry():
+    """INVARIANT : aucun point du tracé d'origine ne s'écarte de plus de la
+    tolérance du tracé simplifié, et aucun segment de longueur nulle ne subsiste."""
+    import numpy as np
+    from shapely.geometry import LineString, Point
+
+    tol = 0.006
+    # tracé de référence : demi-cercle sur-discrétisé (pas de 0,04 mm) + 2 droites
+    ang = np.linspace(0.0, math.pi, 400)
+    arc = [(5.0 * math.cos(a), 5.0 * math.sin(a)) for a in ang]
+    ref = arc + [(-5.0, -3.0), (-5.0, -6.0)]
+    ref.insert(1, ref[1])                       # doublon volontaire
+    out = gc.simplify_items([(ref, 1500, 30)], tol)[0][0]
+
+    simple = LineString(out)
+    assert max(Point(p).distance(simple) for p in ref) <= tol + 1e-9
+    a = np.asarray(out, dtype=float)
+    assert np.hypot(*(a[1:] - a[:-1]).T).min() > 0.0      # aucun segment nul
+    assert out[0] == ref[0] and out[-1] == ref[-1]        # extrémités conservées
+    assert len(out) < len(ref) / 3                        # et ça simplifie vraiment
+
+
+def test_build_reports_stats_and_keeps_m2_last():
+    """Le bilan est renseigné et écrit en en-tête : M2 reste la dernière ligne."""
+    items = [([(0.0, 0.0), (1.0, 0.0005), (2.0, 0.0), (2.0, 2.0)], 1500, 30)]
+    st = {}
+    prog = gc.build(items, gc.GCodeConfig(), stats=st)
+    assert st["segments_before"] == 3 and st["segments_after"] == 2
+    assert st["length_after_mm"] > 0 and st["shortest_mm"] > 0
+    assert st["lines"] == len(prog.splitlines())
+    assert prog.rstrip().endswith("M2")
+    assert "Douglas-Peucker" in prog and "plus petit segment" in prog
+
+
+def test_no_duplicate_consecutive_lines_after_rounding():
+    """Deux points distincts qui s'écrivent pareil à 3 décimales : une seule ligne."""
+    items = [([(10.0, 20.0), (10.0006, 20.0), (10.0009, 20.0), (11.0, 20.0)], 1500, 30)]
+    prog = gc.build(items, gc.GCodeConfig(simplify_tolerance=0.0))
+    moves = [l for l in prog.splitlines() if l[:2] in ("G0", "G1")]
+    assert len(moves) == len({m.split(" F")[0].split(" S")[0] for m in moves})

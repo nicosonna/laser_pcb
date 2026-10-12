@@ -33,6 +33,7 @@ from shapely.ops import unary_union
 
 from .geometry import CopperLayer, Hole, LabeledCopper, label_by_component
 
+from .geometry import quad_segs_for      # discretisation par ecart
 _QUAD_SEGS = 24
 _UM = 1000.0  # microns -> mm
 
@@ -50,13 +51,15 @@ class Symbol:
     def flash(self, x: float, y: float, orient: float = 0.0) -> BaseGeometry | None:
         k, d = self.kind, self.dims
         if k == "round":
-            return Point(x, y).buffer(d[0] / 2, quad_segs=_QUAD_SEGS)
+            return Point(x, y).buffer(d[0] / 2,
+                                      quad_segs=quad_segs_for(d[0] / 2))
         if k == "square":
             g = box(-d[0] / 2, -d[0] / 2, d[0] / 2, d[0] / 2)
         elif k == "rect":
             g = box(-d[0] / 2, -d[1] / 2, d[0] / 2, d[1] / 2)
         elif k == "oval":
-            g = scale(Point(0, 0).buffer(0.5, quad_segs=_QUAD_SEGS), d[0], d[1])
+            g = scale(Point(0, 0).buffer(0.5, quad_segs=quad_segs_for(max(d) / 2)),
+                      d[0], d[1])
         elif k == "octagon":
             g = _octagon(d[0], d[1])
         else:
@@ -151,7 +154,8 @@ def _read_features(path: Path):
             pol = tok[6]
             if sym and sym.width > 0:
                 g = LineString([(x1, y1), (x2, y2)]).buffer(
-                    sym.width / 2, cap_style="round", quad_segs=_QUAD_SEGS)
+                    sym.width / 2, cap_style="round",
+                    quad_segs=quad_segs_for(sym.width / 2))
                 (pos if pol == "P" else neg).append(g)
 
         elif rec == "P" and len(tok) >= 5:
@@ -208,7 +212,7 @@ def _read_surface(lines, i):
     return surf, i
 
 
-def _arc_points(p0, p1, center, cw, seg_deg=12.0):
+def _arc_points(p0, p1, center, cw, seg_deg=None):
     """Approxime un arc ODB++ par des segments (~12° par pas)."""
     cx, cy = center
     a0 = math.atan2(p0[1] - cy, p0[0] - cx)
@@ -220,6 +224,14 @@ def _arc_points(p0, p1, center, cw, seg_deg=12.0):
     else:
         while a1 < a0:
             a1 += 2 * math.pi
+    if seg_deg is None:
+        # pas angulaire deduit du RAYON pour un ecart constant a la courbe :
+        # un pas fixe de 12 deg etait inutilement fin sur les petits arcs.
+        from .geometry import _CURVE_TOL
+        r = math.hypot(p0[0] - center[0], p0[1] - center[1])
+        seg_deg = 90.0 if r <= _CURVE_TOL else math.degrees(
+            2.0 * math.acos(max(-1.0, min(1.0, 1.0 - _CURVE_TOL / r))))
+        seg_deg = max(1.0, min(45.0, seg_deg))
     n = max(1, int(abs(a1 - a0) / math.radians(seg_deg)))
     return [(cx + r * math.cos(a0 + (a1 - a0) * k / n),
              cy + r * math.sin(a0 + (a1 - a0) * k / n)) for k in range(1, n + 1)]
@@ -277,7 +289,8 @@ def iter_features(path: Path):
             pol = tok[6]
             if sym and sym.width > 0:
                 geom = LineString([(x1, y1), (x2, y2)]).buffer(
-                    sym.width / 2, cap_style="round", quad_segs=_QUAD_SEGS)
+                    sym.width / 2, cap_style="round",
+                    quad_segs=quad_segs_for(sym.width / 2))
         elif rec == "P" and len(tok) >= 5:
             x, y = float(tok[1]), float(tok[2])
             sym = symbols.get(int(tok[3]))

@@ -36,6 +36,9 @@ python -m venv .venv
 
 ## Interface graphique
 
+Le plus simple : **double-cliquer sur `laser_pcb.bat`** à la racine du projet
+(utilise le `.venv`, ouvre la GUI sans console). Ou en ligne de commande :
+
 ```bash
 python -m laserpcb.gui.app
 ```

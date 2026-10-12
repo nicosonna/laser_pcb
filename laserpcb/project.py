@@ -52,8 +52,12 @@ class Project:
     source_files: dict[str, str] = field(default_factory=dict)  # relpath -> base64
     layers: list[LayerConfig] = field(default_factory=list)
     kerf: float = 0.10                         # spot Falcon 2 22 W (~0,08–0,1 mm)
-    copper_margin: float = 0.05                # marge laser : élargit pistes/pads (compense laser + perchlorure),
-                                               # plafonnée par net (jamais de pont) ; 0 = off
+    simplify_tolerance: float = 0.006          # mm : simplification des tracés avant
+                                               # écriture (demi-pas moteur à 80 pas/mm).
+                                               # Évite des segments que la machine ne
+                                               # sait pas exécuter (micro-arrêts).
+    copper_margin: float = 0.0                 # marge laser : élargit pistes/pads (compense laser + perchlorure),
+                                               # plafonnée par net (jamais de pont) ; 0 = off (défaut)
     origin: tuple[float, float] = (0.0, 0.0)   # position du PCB sur le plateau (mm)
     bed_width: float = 400.0                   # plateau Falcon 2 : 400 × 415 mm
     bed_height: float = 415.0
@@ -69,7 +73,8 @@ class Project:
     cut_outline_enabled: bool = False
     cut_outline_speed: float = 300.0     # mm/min (basse vitesse)
     cut_outline_power: float = 100.0     # %
-    cut_outline_passes: int = 30
+    cut_outline_passes: int = 35
+    cut_outline_margin: float = 1.0      # mm de FR4 gardés autour du circuit
     # Pourtour gravé AU DÉBUT du job (puissance de gravure) puis pause M0 :
     # on marque la zone sur le martyr, on pose le PCB dedans, on reprend.
     mark_zone_enabled: bool = False
@@ -82,8 +87,17 @@ class Project:
     finish_text_x: float = 2.0          # position bas-gauche du texte (mm, repère carte)
     finish_text_y: float = 2.0
     finish_speed: float = 1500.0        # mm/min (retrait peinture)
-    finish_power: float = 30.0          # %
+    finish_power: float = 20.0          # % (30 brûlait : trop agressif pour la peinture)
     finish_passes: int = 1
+    finish_pads_inset: float = 0.05     # retrait des pads (mm) : reste SUR le cuivre
+    finish_hole_passes: int = 30        # trous en perçage laser (comme la découpe)
+    finish_cut_enabled: bool = False    # découpe du contour EN FIN de finition
+                                        # (réglages du groupe Découpe ; exclusif avec
+                                        # la découpe du job principal)
+    finish_ref_plate_corner: bool = False  # repère finition = coin de la plaque
+                                        # DÉCOUPÉE (+marge, sans offset plateau).
+                                        # Off (défaut) : même zéro que la gravure,
+                                        # le centrage plateau est donc suivi.
     schema: int = SCHEMA
 
     # ---- source embarquée --------------------------------------------------- #
@@ -120,7 +134,8 @@ class Project:
             source_files=d.get("source_files", {}),
             layers=layers,
             kerf=d.get("kerf", 0.10),
-            copper_margin=d.get("copper_margin", 0.05),
+            simplify_tolerance=d.get("simplify_tolerance", 0.006),
+            copper_margin=d.get("copper_margin", 0.0),
             origin=tuple(d.get("origin", (0.0, 0.0))),
             bed_width=d.get("bed_width", 400.0),
             bed_height=d.get("bed_height", 415.0),
@@ -133,7 +148,8 @@ class Project:
             cut_outline_enabled=d.get("cut_outline_enabled", False),
             cut_outline_speed=d.get("cut_outline_speed", 300.0),
             cut_outline_power=d.get("cut_outline_power", 100.0),
-            cut_outline_passes=d.get("cut_outline_passes", 30),
+            cut_outline_passes=d.get("cut_outline_passes", 35),
+            cut_outline_margin=d.get("cut_outline_margin", 1.0),
             mark_zone_enabled=d.get("mark_zone_enabled", False),
             finish_pads=d.get("finish_pads", True),
             finish_holes=d.get("finish_holes", True),
@@ -142,8 +158,12 @@ class Project:
             finish_text_x=d.get("finish_text_x", 2.0),
             finish_text_y=d.get("finish_text_y", 2.0),
             finish_speed=d.get("finish_speed", 1500.0),
-            finish_power=d.get("finish_power", 30.0),
+            finish_power=d.get("finish_power", 20.0),
             finish_passes=d.get("finish_passes", 1),
+            finish_pads_inset=d.get("finish_pads_inset", 0.05),
+            finish_hole_passes=d.get("finish_hole_passes", 30),
+            finish_cut_enabled=d.get("finish_cut_enabled", False),
+            finish_ref_plate_corner=d.get("finish_ref_plate_corner", False),
             schema=d.get("schema", SCHEMA),
         )
 

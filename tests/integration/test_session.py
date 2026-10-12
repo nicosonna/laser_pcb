@@ -159,6 +159,29 @@ def test_mark_zone_engraves_rectangle_then_pauses():
     assert "M0" not in s.generate_gcode()
 
 
+def test_mark_zone_includes_cut_margin_when_cut_enabled():
+    """Découpe active : le pourtour marqué = emprise de la PLAQUE (carte + marge),
+    pour poser une plaque de la bonne taille."""
+    import re
+    s = Session()
+    s.import_source(GERBER)
+    _iso(s)
+    s.project.mark_zone_enabled = True
+    s.project.cut_outline_enabled = True
+    s.project.cut_outline_margin = 2.0
+    g = s.generate_gcode()
+    body = g.splitlines()
+    i_pause = next(i for i, l in enumerate(body) if l.startswith("M0"))
+    xs = [float(m.group(1)) for l in body[:i_pause]
+          for m in [re.search(r"X(-?[\d.]+)", l)] if m]
+    minx, _miny, maxx, _maxy = s.board.bounds
+    assert min(xs) < minx - 1.5 and max(xs) > maxx + 1.5   # rectangle élargi de ~2 mm
+    # et le garde-fou plateau
+    assert s.fits_on_bed()
+    s.project.bed_width = 80.0                              # plateau trop petit
+    assert not s.fits_on_bed()
+
+
 def test_holes_add_lines_to_gcode():
     s = Session()
     s.import_source(ODBPP)
@@ -202,3 +225,106 @@ def test_finish_job_exports_pads_holes_text():
     s.project.finish_holes = False
     s.project.finish_text = ""
     assert "G1" not in s.generate_finish_gcode()
+
+
+def test_kicad_named_gerber_zip_import(tmp_path):
+    """Export KiCad : xxx-F_Cu / -B_Cu / -Edge_Cuts / -PTH.drl reconnus, couches
+    mask/silk ignorées, et carte NORMALISÉE au coin (0,0) (KiCad exporte dans le
+    repère de sa feuille, souvent en Y négatifs)."""
+    import shutil, zipfile
+    from pathlib import Path
+    src = Path(GERBER) / "GerberFiles"
+    z = tmp_path / "proj_kicad.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.write(src / "copper_top.gbr", "proj-F_Cu.gbr")
+        zf.write(src / "copper_bottom.gbr", "proj-B_Cu.gbr")
+        zf.write(src / "profile.gbr", "proj-Edge_Cuts.gbr")
+        zf.write(src / "soldermask_top.gbr", "proj-F_Mask.gbr")     # à ignorer
+        zf.write(src / "silkscreen_top.gbr", "proj-F_Silkscreen.gbr")
+        drill = next((Path(GERBER) / "DrillFiles").iterdir())
+        zf.write(drill, "proj-PTH.drl")
+    s = Session()
+    s.import_source(z)
+    assert s.project.name == "proj_kicad"
+    assert {l.config.role for l in s.layers} == {"top", "bottom"}
+    assert len(s.holes) == 77
+    minx, miny, maxx, _ = s.board.bounds
+    assert abs(minx) < 1e-6 and abs(miny) < 1e-6 and maxx > 79   # coin à (0,0)
+
+
+def test_holes_then_outline_cut_come_last_with_margin():
+    """Ordre en phases : gravure -> TROUS -> DÉCOUPE en dernier (l'optimiseur ne
+    mélange pas), et la découpe passe à `cut_outline_margin` mm du bord."""
+    import re
+    s = Session()
+    s.import_source(GERBER)
+    _iso(s)
+    s.project.hole_enabled = True
+    s.project.cut_outline_enabled = True
+    s.project.cut_outline_margin = 2.0
+    g = s.generate_gcode()
+    lines = g.splitlines()
+    # vitesses distinctes par phase : gravure F1500, trous F600, découpe F300
+    idx = {f: [i for i, l in enumerate(lines) if f in l]
+           for f in ("F1500", "F600", "F300")}
+    assert idx["F1500"] and idx["F600"] and idx["F300"]
+    assert max(idx["F1500"]) < min(idx["F600"]) < min(idx["F300"])
+    # la découpe déborde de ~2 mm du bord de la carte (80 x 135)
+    cut_x = [float(m.group(1)) for i, l in enumerate(lines) if i >= min(idx["F300"])
+             for m in [re.search(r"X(-?[\d.]+)", l)] if m]
+    assert max(cut_x) > s.board.bounds[2] + 1.5      # ~82 mm
+    assert min(cut_x) < s.board.bounds[0] - 1.5      # ~-2 mm
+
+
+def test_finish_referenced_to_plate_corner_when_cut_enabled():
+    """Découpe active : la finition est référencée au COIN de la plaque découpée
+    (+marge, sans offset plateau) — sinon impossible d'aligner après le bain."""
+    import re
+    s = Session()
+    s.import_source(ODBPP)
+    s.project.finish_pads = True
+    s.project.finish_holes = False
+    s.project.origin = (100.0, 50.0)                 # offset plateau du job principal
+    s.project.cut_outline_enabled = False
+    base_x = [float(v) for v in re.findall(r"G1 X(-?[\d.]+)",
+                                           s.generate_finish_gcode())]
+    s.project.cut_outline_enabled = True
+    s.project.cut_outline_margin = 2.0
+    s.project.finish_ref_plate_corner = True   # opt-in explicite (défaut : centrage suivi)
+    g = s.generate_finish_gcode()
+    plate_x = [float(v) for v in re.findall(r"G1 X(-?[\d.]+)", g)]
+    assert "coin de la plaque" in g.splitlines()[0]
+    # sans découpe : coords = job principal (offset plateau 100) ;
+    # avec découpe : coords depuis le coin de plaque = pads + 2 mm (pas de 100)
+    assert min(base_x) > 90
+    assert 1.5 < min(plate_x) < 15
+    assert abs((min(base_x) - 100) - (min(plate_x) - 2)) < 1e-6   # même géométrie
+
+
+def test_finish_cut_and_hole_passes_and_inset():
+    """Finition v2 : trous en perçage (30 passes), découpe optionnelle EN DERNIER
+    (et alors même zéro que la gravure), retrait des pads, peinture à 20 %."""
+    import re
+    s = Session()
+    s.import_source(ODBPP)
+    p = s.project
+    assert p.finish_power == 20.0 and p.finish_hole_passes == 30
+    p.finish_text = ""
+    p.finish_holes = True
+    p.finish_cut_enabled = True
+    p.cut_outline_enabled = True            # les deux cochés : la finition PRIME
+    p.cut_outline_margin = 2.0
+    g = s.generate_finish_gcode()
+    assert "coin de la plaque" not in g.splitlines()[0]   # zéro machine conservé
+    lines = g.splitlines()
+    idx = {f: [i for i, l in enumerate(lines) if f in l]
+           for f in ("F1500", "F600", "F300")}            # peinture / trous / découpe
+    assert idx["F1500"] and idx["F600"] and idx["F300"]
+    assert max(idx["F1500"]) < min(idx["F600"]) < min(idx["F300"])
+    # le retrait des pads réduit la surface dénudée
+    p.finish_cut_enabled = False; p.finish_holes = False
+    p.finish_pads_inset = 0.0
+    full = len([l for l in s.generate_finish_gcode().splitlines() if "G1" in l])
+    p.finish_pads_inset = 0.10
+    inset = len([l for l in s.generate_finish_gcode().splitlines() if "G1" in l])
+    assert inset < full

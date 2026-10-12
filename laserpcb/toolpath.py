@@ -24,7 +24,7 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Mu
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from .geometry import LabeledCopper, components
+from .geometry import LabeledCopper, components, quad_segs_for
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +78,7 @@ def negative_region(copper: BaseGeometry, board: Polygon,
 
 
 def hole_circles(holes, scale_percent: float = -30.0, min_diameter: float = 0.15,
-                 quad_segs: int = 16) -> MultiLineString:
+                 quad_segs: int | None = None) -> MultiLineString:
     """Contours de perçage à graver, diamètre ajusté par un pourcentage.
 
     Un gros trou gravé à son diamètre exact risque de couper une piste voisine ;
@@ -89,7 +89,9 @@ def hole_circles(holes, scale_percent: float = -30.0, min_diameter: float = 0.15
     lines = []
     for h in holes:
         d = max(h.diameter * (1 + scale_percent / 100.0), min_diameter)
-        ring = Point(h.x, h.y).buffer(d / 2.0, quad_segs=quad_segs).exterior
+        # discretisation pilotee par l ecart a la courbe (pas un pas fixe)
+        qs = quad_segs if quad_segs else quad_segs_for(d / 2.0)
+        ring = Point(h.x, h.y).buffer(d / 2.0, quad_segs=qs).exterior
         lines.append(LineString(ring.coords))
     return MultiLineString(lines)
 
@@ -111,12 +113,16 @@ def clearing_zones(region: BaseGeometry, copper: BaseGeometry,
 
 
 def hatch(region: BaseGeometry, spacing: float = 0.12,
-          angle: float = 0.0) -> MultiLineString:
+          angle: float = 0.0, outline: bool = False) -> MultiLineString:
     """Remplit une surface de lignes parallèles (balayage laser).
 
     :param spacing: pas entre lignes en mm (typiquement ~kerf pour un recouvrement
                     complet).
     :param angle:   orientation des hachures en degrés.
+    :param outline: ajoute le TRAIT DU CONTOUR de la zone. Sans lui, le long des
+                    bords parallèles au balayage, la dernière ligne peut passer
+                    jusqu'à spacing/2 trop loin -> bande de peinture non brûlée
+                    (= lamelle de cuivre résiduelle après gravure chimique).
     """
     if region.is_empty:
         return MultiLineString()
@@ -137,14 +143,21 @@ def hatch(region: BaseGeometry, spacing: float = 0.12,
     lines: list[LineString] = []
     _collect_lines(work.intersection(scans), lines)
 
-    if not lines:
-        return MultiLineString()
-    if not angle:
-        return MultiLineString(lines)
-    merged = rotate(MultiLineString(lines), angle, origin=origin, use_radians=False)
-    if merged.geom_type == "LineString":
-        return MultiLineString([merged])
-    return merged
+    out: list[LineString] = []
+    if lines:
+        if angle:
+            merged = rotate(MultiLineString(lines), angle, origin=origin,
+                            use_radians=False)
+            out = list(getattr(merged, "geoms", [merged]))
+        else:
+            out = lines
+    if outline:                       # contour de zone (repère d'origine, non tourné)
+        for poly in getattr(region, "geoms", [region]):
+            if poly.geom_type != "Polygon" or poly.is_empty:
+                continue
+            out.append(LineString(poly.exterior.coords))
+            out += [LineString(r.coords) for r in poly.interiors]
+    return MultiLineString(out) if out else MultiLineString()
 
 
 # --------------------------------------------------------------------------- #
@@ -355,30 +368,36 @@ def combined_isolation(labeled: LabeledCopper, board, kerf: float = 0.10,
 
 def expand_copper(labeled: LabeledCopper, margin: float,
                   min_gap: float) -> LabeledCopper:
-    """Élargit chaque net de ``margin`` **sans jamais ponter un autre net**.
+    """Élargit le cuivre de ``margin`` **sans jamais rétrécir un canal sous
+    ``min_gap``** (le kerf) — règle LOCALE, par côté de piste.
 
-    Chaque net grandit dans l'espace libre, mais reste à ≥ ``min_gap`` (le kerf) de
-    tout autre net → aucun pont, quelle que soit la marge (le fine-pitch est
-    automatiquement limité). Un net ne devient jamais plus petit que l'original.
+    Les canaux du vide plus fins que ``min_gap + 2·margin`` sont **préservés tels
+    quels** (marge locale 0) : entre deux nets (aucun pont possible) COMME à
+    l'intérieur d'un même footprint (dégagements thermiques, fossés entre pads du
+    même net — l'ancien plafonnage par net les laissait se remplir). Partout
+    ailleurs la marge s'applique pleinement et il reste toujours ≥ ``min_gap``.
+    Un net ne devient jamais plus petit que l'original.
     """
     from shapely import STRtree
 
     if margin <= 0:
         return labeled
+    union = labeled.union
+    gap = labeled.board.difference(union)
+    # Canaux trop fins pour absorber la marge = ce que l'« ouverture » morphologique
+    # fait disparaître (même mécanique que la fusion d'anneaux de combined_isolation).
+    r = min_gap / 2.0 + margin
+    keep_open = gap.difference(gap.buffer(-r).buffer(r))
     names = list(labeled.net_geoms)
     geoms = [labeled.net_geoms[n] for n in names]
     tree = STRtree(geoms)
     out: dict = {}
     for i, (name, gi) in enumerate(zip(names, geoms)):
-        near = [geoms[int(j)] for j in tree.query(gi.buffer(margin + min_gap))
+        grown = gi.buffer(margin).difference(keep_open)
+        near = [geoms[int(j)] for j in tree.query(gi.buffer(margin))
                 if int(j) != i]
-        grown = gi.buffer(margin)
-        if near:
-            # On reste (margin+min_gap) du cuivre d'origine des autres nets : comme
-            # eux s'élargissent aussi de `margin`, il reste toujours >= min_gap entre
-            # les deux cuivres ÉLARGIS -> aucun pont (symétrique).
-            forbidden = unary_union(near).buffer(margin + min_gap)
-            grown = grown.difference(forbidden)
+        if near:                        # gap < margin : ne pas déborder SUR l'autre net
+            grown = grown.difference(unary_union(near))
         out[name] = gi.union(grown)                         # jamais plus petit que l'origine
     return LabeledCopper(labeled.layer, out, labeled.board, labeled.has_nets)
 

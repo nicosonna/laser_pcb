@@ -27,7 +27,27 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 # Finesse d'approximation des cercles/arcs (nb de segments par quart de cercle).
-_QUAD_SEGS = 24
+# Discretisation des courbes : on vise un ECART A LA COURBE, pas un pas fixe.
+# Un nombre de segments constant donnait 96 segments par cercle quel que soit le
+# rayon, soit un pas de 0,010 mm sur un petit via (sous le pas moteur de 0,0125 mm)
+# pour une fidelite de 0,08 um dont personne n a besoin.
+_CURVE_TOL = 0.005        # mm : ecart maximal tolere entre le polygone et la courbe
+_QUAD_SEGS = 24           # plafond (garde la compatibilite des appels existants)
+
+
+def quad_segs_for(radius: float, tol: float = _CURVE_TOL,
+                  lo: int = 2, hi: int = _QUAD_SEGS) -> int:
+    """Segments par quadrant pour que l ecart a la courbe reste <= ``tol``.
+
+    Sagitta d une corde : e = r (1 - cos(pi/N)) pour N segments sur le cercle.
+    On inverse pour obtenir N, puis on borne (petits rayons -> peu de segments,
+    gros rayons -> plafonnes pour ne pas exploser le nombre de points).
+    """
+    import math
+    if radius <= tol:
+        return lo
+    n_circle = math.pi / math.acos(max(-1.0, min(1.0, 1.0 - tol / radius)))
+    return int(min(hi, max(lo, math.ceil(n_circle / 4.0))))
 
 
 # --------------------------------------------------------------------------- #
@@ -41,14 +61,15 @@ def _primitive_to_shapely(prim) -> BaseGeometry | None:
     kind = type(prim).__name__
 
     if kind == "Circle":
-        return Point(prim.x, prim.y).buffer(prim.r, quad_segs=_QUAD_SEGS)
+        return Point(prim.x, prim.y).buffer(prim.r, quad_segs=quad_segs_for(prim.r))
 
     if kind == "Line":
         if prim.width <= 0:
             return None
         # Aperture circulaire tirée d'un point à l'autre -> bouts ronds.
         line = LineString([(prim.x1, prim.y1), (prim.x2, prim.y2)])
-        return line.buffer(prim.width / 2.0, cap_style="round", quad_segs=_QUAD_SEGS)
+        return line.buffer(prim.width / 2.0, cap_style="round",
+                           quad_segs=quad_segs_for(prim.width / 2.0))
 
     if kind == "Rectangle":
         b = box(prim.x - prim.w / 2.0, prim.y - prim.h / 2.0,

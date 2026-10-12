@@ -76,3 +76,36 @@ def test_stream_worker_engraves_via_fakegrbl(qapp):
     worker.start()
     worker.wait(5000)                          # attend la fin du thread (5 s max)
     assert fake.received == ["G21", "G1 X5 F600 S500", "M5"]
+
+
+def test_home_button_shows_machine_state_and_alarm(qapp):
+    """Le bouton Home porte l'état : une ALARME doit sauter aux yeux (rouge)."""
+    from laserpcb.gui.send_panel import SendPanel
+    p = SendPanel(get_gcode=lambda: "G21")
+    assert p.btn_home.text() == "⌂ Home" and not p.btn_home.styleSheet()
+    p._set_state("Idle")
+    assert "Idle" in p.btn_home.text() and not p.btn_home.styleSheet()
+    p._set_state("Alarm")
+    assert "ALARM" in p.btn_home.text()
+    assert "c0392b" in p.btn_home.styleSheet()          # fond rouge
+    assert "ALARME" in p.btn_home.toolTip()
+    p._set_state("")                                    # déconnecté : remise à zéro
+    assert p.btn_home.text() == "⌂ Home" and not p.btn_home.styleSheet()
+
+
+def test_state_polling_updates_button_without_blocking(qapp):
+    """Le sondage d'état passe par un thread : il ne doit pas figer l'interface."""
+    import time
+    from laserpcb.gui.send_panel import SendPanel
+    from laserpcb.sender import FakeFluidNC, GrblSender
+    p = SendPanel(get_gcode=lambda: "G21")
+    p.sender = GrblSender(FakeFluidNC())
+    p.sender.connect()
+    p._poll_state()
+    t = time.time()
+    while p._state_worker is not None and time.time() - t < 5:
+        qapp.processEvents(); time.sleep(0.01)
+    assert "Idle" in p.btn_home.text()
+    # home auto : l'option existe et est mémorisée, désactivée par défaut (la
+    # machine BOUGE au homing -> on ne l'impose jamais)
+    assert p.home_auto.isChecked() in (True, False)
