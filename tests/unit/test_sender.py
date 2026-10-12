@@ -85,3 +85,60 @@ def test_origin_and_pointer():
     assert any(l.startswith("M3 S") for l in fake.received)   # pointeur allumé
     assert "$32=0" in fake.received and "$32=1" in fake.received  # mode laser off/on
     assert "M5" in fake.received
+
+
+def test_fluidnc_banner_and_pointer_despite_rejected_setting():
+    """FluidNC : banniere reconnue, et le pointeur marche meme si $32 est refuse
+    (chez FluidNC le mode laser est dans le YAML, pas dans $32)."""
+    from laserpcb.sender import FakeFluidNC
+    fake = FakeFluidNC()
+    s = GrblSender(fake)
+    s.connect()
+    assert s.is_fluidnc and "FluidNC" in s.firmware
+    s.laser_on(1.0)                       # ne doit PAS lever malgre error:3
+    assert "M3 S10" in fake.received
+    s.laser_off()
+    assert "M5" in fake.received
+
+
+def test_fluidnc_sd_list_and_run():
+    """Carte SD : listing (nom + taille) et lancement autonome."""
+    from laserpcb.sender import FakeFluidNC, GrblError
+    fake = FakeFluidNC(sd={"/job.gcode": 2048})
+    s = GrblSender(fake)
+    s.connect()
+    assert s.sd_list() == {"/job.gcode": 2048}
+    s.sd_run("job.gcode")
+    assert fake.ran == ["/job.gcode"]
+    # fichier absent -> erreur remontee (pas de gravure fantome)
+    try:
+        s.sd_run("absent.gcode")
+    except GrblError:
+        pass
+    else:
+        raise AssertionError("un fichier absent doit lever une erreur")
+
+
+def test_telnet_transport_readline_buffers_partial_chunks():
+    """Le transport WiFi doit reconstituer les lignes coupees en morceaux TCP,
+    et rendre b'' quand rien n'arrive (meme semantique que pyserial)."""
+    from laserpcb.sender import TelnetTransport
+    t = TelnetTransport.__new__(TelnetTransport)     # sans ouvrir de socket
+    t._buf = b""
+    chunks = [b"Grbl 3.0 [Fl", b"uidNC v3.7]\r\nok\r\n", b""]
+    class _S:
+        def recv(self, n): return chunks.pop(0) if chunks else b""
+    t.sock = _S()
+    assert t.readline() == b"Grbl 3.0 [FluidNC v3.7]\r\n"
+    assert t.readline() == b"ok\r\n"
+    assert t.readline() == b""
+
+
+def test_error_codes_are_explained_in_plain_language():
+    """Un code brut n'aide pas : error:60 doit parler de carte SD."""
+    from laserpcb.sender import GrblError, explain
+    assert "carte SD" in explain("error:60")
+    assert "ALARME" in explain("error:9")
+    assert explain("error:999") == "error:999"       # code inconnu : tel quel
+    e = GrblError("error:60", "$SD/List")
+    assert e.code == 60 and "carte SD" in str(e) and "$SD/List" in str(e)
