@@ -769,8 +769,11 @@ class Session:
             def phase(*kinds, exclude=False):
                 return [(c, f, p) for (c, f, p, k) in placed
                         if (k in kinds) != exclude]
-            engrave = phase("hole", "cut", exclude=True)
+            engrave = phase("hole", "cut", "dessin", exclude=True)
             ordered = gc.optimize(engrave, config.max_optimize)
+            # Le DESSIN garde son ordre : il porte « percer avant de detourer »,
+            # que l'optimiseur de trajets detruirait en le reordonnant.
+            ordered += phase("dessin")
             ordered += gc.optimize(phase("hole"), config.max_optimize)
             ordered += phase("cut")            # passes de découpe : ordre conservé
             from dataclasses import replace
@@ -948,7 +951,10 @@ class Session:
         if not p.shapes:
             return []
         out = []
-        for shape in self.plate_shapes():
+        # PERCER AVANT DE DETOURER : une piece detouree n'est plus tenue par la
+        # plaque. L'ordre est calcule ici et doit survivre jusqu'au G-code.
+        from .. import arrange as ar
+        for shape in ar.cut_order(self.plate_shapes()):
             layer = self.layer_by_id(shape.layer)
             if layer is None or not layer.enabled:
                 continue

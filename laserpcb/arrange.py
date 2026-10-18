@@ -68,16 +68,29 @@ def group_shapes(shapes: list) -> list:
             j = int(j)
             if j <= i:
                 continue
-            # RECOUVREMENT reel, pas simple contact : deux panneaux poses bord
-            # a bord se « touchent » au sens de shapely et seraient fusionnes
-            # en une seule piece impossible a placer.
-            if geoms[j].intersection(g).area > 1e-9:
+            if _solidaires(g, geoms[j]):
                 fusion(i, j)
 
     groupes: dict = {}
     for i, s in enumerate(valides):
         groupes.setdefault(racine(i), []).append(s)
     return list(groupes.values())
+
+
+def _solidaires(a, b) -> bool:
+    """Ces deux geometries appartiennent-elles a la meme piece ?
+
+    - Deux SURFACES : il faut un recouvrement REEL. Deux panneaux poses bord a
+      bord se « touchent » au sens de shapely ; les fusionner donnerait une
+      piece impossible a placer.
+    - Un TRACE sans aire (decor grave, ligne de pliage) n'a aucune aire a
+      partager : il appartient au panneau qui le CONTIENT. Sans ce cas, chaque
+      trait de motif partait sur son propre plateau.
+    """
+    if a.area > 1e-9 and b.area > 1e-9:
+        return a.intersection(b).area > 1e-9
+    gros, petit = (a, b) if a.area >= b.area else (b, a)
+    return gros.area > 1e-9 and gros.intersects(petit) and gros.contains(petit)
 
 
 def _bbox(groupe: list):
@@ -224,3 +237,41 @@ def plate_count(shapes: list) -> int:
 
 def shapes_on(shapes: list, plate: int) -> list:
     return [s for s in shapes if int(getattr(s, "plate", 0)) == plate]
+
+
+def cut_order(shapes: list) -> list:
+    """Ordonne les formes pour PERCER AVANT DE DÉTOURER.
+
+    Une pièce détourée n'est plus tenue par la plaque : elle glisse, bascule ou
+    colle au laser. Tout ce qui est intérieur — perçages, mortaises, décor —
+    doit donc passer tant que la pièce est encore dans la masse, et le contour
+    extérieur en dernier.
+
+    Entre pièces, un simple plus-proche-voisin limite les trajets à vide sans
+    jamais mélanger deux pièces.
+    """
+    groupes = group_shapes(shapes)
+    if not groupes:
+        return list(shapes)
+
+    restants = []
+    for grp in groupes:
+        # Aire croissante : les perçages d'abord, le contour extérieur en
+        # dernier. Un trou dans un trou reste lui aussi au bon rang.
+        grp = sorted(grp, key=lambda s: (s.geometry().area, s.id))
+        b = _bbox(grp)
+        centre = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) if b else (0.0, 0.0)
+        restants.append((centre, grp))
+
+    out, pos = [], (0.0, 0.0)
+    while restants:
+        i = min(range(len(restants)),
+                key=lambda k: ((restants[k][0][0] - pos[0]) ** 2
+                               + (restants[k][0][1] - pos[1]) ** 2))
+        centre, grp = restants.pop(i)
+        out.extend(grp)
+        pos = centre
+
+    vus = {id(s) for s in out}
+    out.extend(s for s in shapes if id(s) not in vus)   # formes sans géométrie
+    return out

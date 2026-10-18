@@ -616,6 +616,53 @@ class DrawingEditor(QObject):
         self.plates_changed.emit()
         return res
 
+    # ---- generateur de boites ------------------------------------------------ #
+    def insert_box(self, pieces: list, thickness: float) -> dict:
+        """Pose les panneaux d'un meuble, calques reglés depuis l'EPAISSEUR.
+
+        Deux calques dédiés sont créés ou mis à jour : la découpe (passes et
+        puissance déduites de l'épaisseur) et le décor (gravure légère). Les
+        confondre ruinerait la façade — ou laisserait les panneaux attachés.
+        """
+        from .. import boxgen as bg
+        if not pieces:
+            return {"pieces": 0, "shapes": 0, "plates": 0}
+
+        coupe = self._ensure_layer("Découpe bois", "#c0392b",
+                                   bg.cut_profile(thickness))
+        decor = self._ensure_layer("Décor (gravure)", "#2b6cb0",
+                                   bg.engrave_profile(thickness))
+        shapes = bg.to_shapes(pieces, layer_cut=coupe.id, layer_decor=decor.id,
+                              existing=self.project.shapes)
+        self._begin()
+        self.project.shapes.extend(shapes)
+        # Une rangee de panneaux fait plusieurs metres : on la repartit tout de
+        # suite sur les plateaux, sinon rien n'est visible ni gravable.
+        p = self.project
+        from .. import arrange as ar
+        res = ar.arrange(shapes, p.bed_width, p.bed_height, gap=p.arrange_gap,
+                         margin=p.arrange_margin, allow_rotate=p.arrange_rotate)
+        self._commit(f"Insérer {len(pieces)} panneaux")
+        s = self._get_session()
+        s.active_plate = 0
+        self.plates_changed.emit()
+        return {"pieces": len(pieces), "shapes": len(shapes),
+                "plates": res["plates"], "oversized": res["oversized"]}
+
+    def _ensure_layer(self, name: str, color: str, profile: dict):
+        """Calque de travail portant ce nom, créé au besoin et remis à jour."""
+        lays = self.layers()
+        lay = next((c for c in lays if c.name == name), None)
+        if lay is None:
+            lay = dr.WorkLayer(id=dr.new_id("c", lays), name=name, color=color)
+            lays.append(lay)
+        lay.mode = dr.MODE_LINE          # trait : on découpe/trace, on ne remplit pas
+        lay.passes = int(profile.get("passes", 1))
+        lay.power = float(profile.get("power", 80.0))
+        lay.speed = float(profile.get("speed", 300.0))
+        lay.enabled = True
+        return lay
+
     def _restore(self, dicts: list) -> None:
         self.project.shapes[:] = [dr.Shape.from_dict(d) for d in dicts]
         self._refresh()

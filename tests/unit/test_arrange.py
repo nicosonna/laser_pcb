@@ -155,3 +155,41 @@ def test_deux_pieces_qui_se_TOUCHENT_restent_distinctes():
     a = _rect(100, 100, x=0, y=0, ident="a")
     b = _rect(100, 100, x=100, y=0, ident="b")        # bords jointifs
     assert len(ar.group_shapes([a, b])) == 2
+
+
+def test_percer_avant_de_detourer():
+    """Une pièce détourée n'est plus tenue : elle glisse ou colle au laser.
+
+    L'ordre doit donc être : intérieurs d'abord, contour extérieur en dernier.
+    """
+    contour = _rect(200, 100, ident="contour")
+    t1 = _rect(10, 10, x=20, y=20, ident="t1")
+    t2 = _rect(10, 10, x=160, y=70, ident="t2")
+    ordre = [s.id for s in ar.cut_order([contour, t1, t2])]
+    assert ordre[-1] == "contour"
+    assert set(ordre[:2]) == {"t1", "t2"}
+
+
+def test_lordre_de_decoupe_ne_melange_pas_deux_pieces():
+    """Chaque pièce est finie avant de passer à la suivante."""
+    a, a1 = _rect(100, 100, ident="a"), _rect(8, 8, x=10, y=10, ident="a1")
+    b, b1 = _rect(100, 100, x=300, ident="b"), _rect(8, 8, x=310, y=10, ident="b1")
+    ordre = [s.id for s in ar.cut_order([a, b1, a1, b])]
+    assert ordre.index("a1") < ordre.index("a")
+    assert ordre.index("b1") < ordre.index("b")
+    # pas d'entrelacement
+    bloc_a = [i for i, n in enumerate(ordre) if n in ("a", "a1")]
+    assert bloc_a == sorted(bloc_a) and bloc_a[1] - bloc_a[0] == 1
+
+
+def test_le_decor_sans_aire_suit_son_panneau():
+    """Un tracé gravé n'a pas d'aire : sans règle dédiée, il partait seul."""
+    from shapely.geometry import LineString
+    panneau = _rect(200, 100, ident="panneau")
+    trait = Shape("trace", {"wkt": LineString([(20, 50), (180, 50)]).wkt},
+                  id="decor")
+    groupes = ar.group_shapes([panneau, trait])
+    assert len(groupes) == 1, "le décor doit rester avec sa façade"
+    ar.arrange([panneau, trait], BED_W, BED_H, gap=5, margin=5)
+    assert trait.plate == panneau.plate
+    assert panneau.geometry().contains(trait.geometry())

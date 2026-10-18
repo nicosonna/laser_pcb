@@ -206,6 +206,52 @@ figés : une poignée saisie sur un plateau voisin travaillerait dans le mauvais
 repère. En revanche, **lâcher une pièce sur le plateau d'à côté l'y transfère**
 (`DrawingEditor.move_shape`), coordonnées locales conservées.
 
+## Assistant de meubles (`laserpcb/boxgen.py`)
+
+Dans l'esprit de boxes.py : on décrit le meuble par ses cotes, le logiciel en
+déduit tous les panneaux et leurs assemblages à tenons. Quatre modèles — boîte
+ou plateau, bac à compartiments, casier d'étagère, armoire murale — dans une
+fenêtre à part, avec aperçu immédiat.
+
+**L'assemblage.** Deux panneaux perpendiculaires se joignent par un peigne :
+l'un porte des tenons qui dépassent de l'épaisseur du voisin, l'autre des
+encoches de même profondeur, aux mêmes positions. Le motif commence et finit
+par un creux — les coins restent pleins — et il est symétrique, donc identique
+lu à l'envers : aucune question d'orientation au montage.
+
+Les tenons comblent l'épaisseur du voisin, donc **les cotes extérieures
+annoncées sont celles du meuble assemblé**.
+
+**Le jeu de coupe.** Le laser enlève de la matière : sans compensation, un tenon
+sort trop petit et flotte. `kerf` élargit les tenons et rétrécit les encoches
+d'un demi-trait chacun.
+
+**L'épaisseur commande la gravure.** `cut_profile()` est calé sur un point
+MESURÉ : 4 mm de contreplaqué passent en 5 passes à 80 %. Le reste est
+extrapolé — à vérifier sur une chute, le bois variant d'un lot à l'autre. Le
+calque « Découpe bois » est réglé tout seul, et le chiffre est affiché avant de
+lancer quoi que ce soit.
+
+**Le décor est de la GRAVURE.** Motifs géométriques et textes partent sur un
+calque à faible puissance, par défaut sur les seules façades (avant, porte).
+Les confondre avec la découpe ruinerait le panneau.
+
+## Percer avant de détourer
+
+`arrange.cut_order()` ordonne les formes pour que tout ce qui est intérieur —
+perçages, mortaises, décor — passe **tant que la pièce est encore tenue par la
+plaque**, le contour extérieur en dernier. Une pièce détourée trop tôt glisse,
+bascule ou colle au laser.
+
+Deux conditions pour que ça tienne jusqu'au bout :
+
+- le regroupement doit rattacher au panneau un tracé **sans aire** (le décor
+  gravé est une ligne) : sinon chaque trait de motif partait sur son propre
+  plateau ;
+- la catégorie `dessin` est **exclue de l'optimiseur de trajets**, qui
+  réordonne librement et détruirait l'ordre. Entre pièces, un simple
+  plus-proche-voisin limite les trajets à vide sans jamais les entrelacer.
+
 ## Reste à faire
 
 - **Import DXF** (l'autre format de CAO). Le type d'objet `trace` est déjà en

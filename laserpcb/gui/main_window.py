@@ -524,6 +524,37 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self._layer_widgets: list[LayerWidget] = []
 
+    def open_box_wizard(self):
+        """Ouvre l'assistant de meubles, dans sa propre fenêtre.
+
+        Non modale : on continue de voir le plateau pendant qu'on règle les
+        cotes, et on peut insérer plusieurs meubles d'affilée.
+        """
+        from .box_wizard import BoxWizard
+        if getattr(self, "_box_wizard", None) is None:
+            self._box_wizard = BoxWizard(self, thickness=4.0,
+                                         kerf=self.session.project.kerf)
+            self._box_wizard.accepted.connect(self._insert_box)
+        self._box_wizard.show()
+        self._box_wizard.raise_()
+        self._box_wizard.activateWindow()
+
+    def _insert_box(self):
+        w = self._box_wizard
+        res = self.editor.insert_box(w.pieces, w.t.value())
+        if not res["shapes"]:
+            QMessageBox.information(self, "Assistant", "Rien à insérer.")
+            return
+        msg = (f"{res['pieces']} panneaux insérés sur {res['plates']} plateau(x) "
+               f"— découpe réglée pour {w.t.value():g} mm.")
+        if res.get("oversized"):
+            msg += (chr(10) + chr(10) + f"{len(res['oversized'])} panneau(x) plus "
+                    "grand(s) que le plateau : réduisez le meuble ou agrandissez "
+                    "le plateau.")
+            QMessageBox.warning(self, "Assistant", msg)
+        else:
+            self.statusBar().showMessage(msg)
+
     def new_drawing(self):
         """Repart d'une feuille vierge : aucun PCB, juste le plateau.
 
@@ -548,6 +579,9 @@ class MainWindow(QMainWindow):
     def _build_menu(self):
         m = self.menuBar().addMenu("&Fichier")
         a = m.addAction("Nouveau dessin (sans PCB)…", self.new_drawing)
+        a = m.addAction("Assistant boîte / casier / armoire…", self.open_box_wizard)
+        a.setToolTip("Génère les panneaux d'un meuble assemblé à tenons, "
+                     "réglages de découpe déduits de l'épaisseur du bois.")
         a.setToolTip("Feuille vierge : graver ou découper autre chose qu'un "
                      "circuit — boîtier, plaque, gabarit, pochoir.")
         m.addSeparator()
