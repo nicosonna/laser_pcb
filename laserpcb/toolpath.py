@@ -24,7 +24,8 @@ from shapely.geometry import GeometryCollection, LineString, MultiLineString, Mu
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
-from .geometry import LabeledCopper, components, quad_segs_for
+from .geometry import (LabeledCopper, components, quad_segs_for,
+                       _CURVE_TOL)
 
 
 # --------------------------------------------------------------------------- #
@@ -78,16 +79,26 @@ def negative_region(copper: BaseGeometry, board: Polygon,
 
 
 def hole_circles(holes, scale_percent: float = -30.0, min_diameter: float = 0.15,
-                 quad_segs: int | None = None) -> MultiLineString:
+                 quad_segs: int | None = None,
+                 skip_below: float = 0.0) -> MultiLineString:
     """Contours de perçage à graver, diamètre ajusté par un pourcentage.
 
     Un gros trou gravé à son diamètre exact risque de couper une piste voisine ;
     un pourcentage négatif le rétrécit (et réduit le temps de coupe). ``scale_percent``
     = -30 → cercle à 70 % du Ø nominal (comportement de la v1).
+
+    ``skip_below`` : seuil sur le Ø NOMINAL (mm). Un trou plus petit n'est pas
+    percé du tout. Les vias (0,5 à 0,8 mm) et les trous de connecteur (1 mm)
+    sont trop petits pour le laser : le cercle fait la taille du faisceau, la
+    chaleur ne s'évacue pas et tout brûle autour (vécu sur solar_gps_proto,
+    13.10.2026). À ne pas confondre avec ``min_diameter``, qui borne le cercle
+    TRACÉ d'un trou qu'on perce.
     """
     from shapely.geometry import Point
     lines = []
     for h in holes:
+        if h.diameter < skip_below - 1e-9:
+            continue
         d = max(h.diameter * (1 + scale_percent / 100.0), min_diameter)
         # discretisation pilotee par l ecart a la courbe (pas un pas fixe)
         qs = quad_segs if quad_segs else quad_segs_for(d / 2.0)
@@ -359,6 +370,7 @@ def combined_isolation(labeled: LabeledCopper, board, kerf: float = 0.10,
     # où ``tight_gap_passes`` fait un seul passage centré à la place.
     liseré = union.buffer(kerf, join_style="mitre", mitre_limit=5.0)
     closed = liseré.buffer(-kerf / 2.0, join_style="mitre", mitre_limit=5.0)
+    closed = closed.simplify(_CURVE_TOL, preserve_topology=True)
     rings = MultiLineString(_boundaries(closed))
     # Zone à évider : le non-cuivre AU-DELÀ du liseré d'isolation (le reste du fond),
     # pour retirer l'excès de cuivre sans re-graver le bord des pistes.
@@ -398,7 +410,11 @@ def expand_copper(labeled: LabeledCopper, margin: float,
                 if int(j) != i]
         if near:                        # gap < margin : ne pas déborder SUR l'autre net
             grown = grown.difference(unary_union(near))
-        out[name] = gi.union(grown)                         # jamais plus petit que l'origine
+        # Les booleens de la marge (buffer + difference + union) laissent des
+        # micro-sommets a quelques microns : on les gomme ICI, a la source,
+        # sinon chaque contour qui en derive les traine jusqu'au G-code.
+        merged = gi.union(grown)                            # jamais plus petit que l'origine
+        out[name] = merged.simplify(_CURVE_TOL, preserve_topology=True)
     return LabeledCopper(labeled.layer, out, labeled.board, labeled.has_nets)
 
 

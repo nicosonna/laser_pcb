@@ -5,6 +5,9 @@ shapely>=2.0
 # Aperçu / rendu de développement
 matplotlib>=3.8
 
+# Import SVG (logos, dessins faits ailleurs)
+svgelements>=1.9
+
 # GUI (phase suivante)
 PySide6>=6.6
 

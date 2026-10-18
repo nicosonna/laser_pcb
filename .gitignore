@@ -10,3 +10,6 @@ htmlcov/
 build/
 dist/
 *.spec
+laser_pcb.log
+laser_pcb_crash.log
+gui_session.log

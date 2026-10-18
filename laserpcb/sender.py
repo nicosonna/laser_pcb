@@ -43,15 +43,34 @@ GRBL_ERRORS = {
 }
 
 
+# Les ALARMES ont leur propre numerotation, SANS rapport avec celle des erreurs :
+# appliquer la table des error: a un ALARM: donne un message faux (ALARM:2 n'est
+# pas « nombre mal forme » mais un depassement de course machine).
+GRBL_ALARMS = {
+    1: "fin de course declenche : position perdue, refaire l'origine",
+    2: "la commande SORT DE LA COURSE MACHINE (soft limit) : le job depasse la "
+       "zone de travail, verifiez la position sur le plateau et l'origine",
+    3: "reinitialisation pendant un mouvement : position perdue, refaire l'origine",
+    4: "echec de palpage",
+    5: "echec de palpage",
+    6: "origine interrompue par une reinitialisation",
+    7: "origine : porte de securite ouverte",
+    8: "origine : degagement du fin de course impossible",
+    9: "origine : fin de course introuvable (verifiez les capteurs)",
+}
+
+
 def explain(response: str) -> str:
-    """« error:60 » -> « error:60 (carte SD illisible : ...) »."""
+    """« error:60 » -> « error:60 (carte SD illisible...) », et idem pour ALARM."""
     if ":" not in response:
         return response
+    head, _, rest = response.partition(":")
     try:
-        code = int(response.split(":", 1)[1].strip())
+        code = int(rest.strip())
     except ValueError:
         return response
-    detail = GRBL_ERRORS.get(code)
+    table = GRBL_ALARMS if head.strip().upper() == "ALARM" else GRBL_ERRORS
+    detail = table.get(code)
     return f"{response} ({detail})" if detail else response
 
 
@@ -207,6 +226,21 @@ class FakeFluidNC(FakeGrbl):
 _COMMENT = re.compile(r"\([^)]*\)")
 
 
+def gcode_bounds(gcode: str):
+    """Emprise (minx, miny, maxx, maxy) des X/Y d'un G-code, commentaires
+    exclus — un nom de projet « X12 » dans l'entete ne doit pas compter.
+    None si aucune coordonnee."""
+    xs, ys = [], []
+    for line in clean_lines(gcode):
+        for m in re.finditer(r"X(-?[0-9.]+)", line):
+            xs.append(float(m.group(1)))
+        for m in re.finditer(r"Y(-?[0-9.]+)", line):
+            ys.append(float(m.group(1)))
+    if not xs or not ys:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def clean_lines(gcode: str) -> list[str]:
     """Retire commentaires ``;`` / ``(...)`` et lignes vides."""
     out = []
@@ -223,11 +257,13 @@ def clean_lines(gcode: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 class GrblSender:
     firmware: str = ""          # banniere du controleur (rempli par connect)
+    log = None                  # callback(sens, texte) pour le terminal du GUI
 
     def __init__(self, transport: Transport, empty_reads_timeout: int = 2000):
         self.t = transport
         self._empty_timeout = empty_reads_timeout
         self._wlock = threading.Lock()       # sérialise les écritures (streaming vs temps
+        self._quiet = False                  # coupe le journal pendant la gravure
         self._iolock = threading.RLock()     # sérialise les ÉCHANGES complets
                                              # (ordre + sa réponse) : sinon un
                                              # sondage d'état volerait le « ok »
@@ -280,7 +316,12 @@ class GrblSender:
         while True:
             raw = self.t.readline()
             if not raw:
-                empties += 1
+                # En pause (feed hold) la machine n'acquitte plus rien : ce
+                # silence est normal et ne doit pas finir en TimeoutError (qui
+                # coupait le flux et desactivait « Reprise », machine bloquee en
+                # Hold avec son tampon plein).
+                if not getattr(self, "_holding", False):
+                    empties += 1
                 if empties > self._empty_timeout:
                     raise TimeoutError("aucune réponse de GRBL")
                 continue
@@ -293,10 +334,23 @@ class GrblSender:
                 raise GrblError(line)
             # message poussé (état <...>, [MSG:...], bannière) -> ignoré ici
 
+    def _emit_log(self, way: str, text: str) -> None:
+        """Journalise un echange. Muet pendant la gravure : des dizaines de
+        milliers de lignes noieraient le terminal et ralentiraient le flux."""
+        if self.log is None or self._quiet:
+            return
+        try:
+            self.log(way, text)
+        except Exception:  # noqa: BLE001
+            pass            # le journal ne doit JAMAIS casser une commande
+
     def send_line(self, line: str) -> str:
         with self._iolock:
+            self._emit_log(">", line)
             self._write((line + "\n").encode())
-            return self._read_response()
+            reply = self._read_response()
+            self._emit_log("<", reply)
+            return reply
 
     def stream(self, gcode: str,
                progress: Callable[[int, int], None] | None = None,
@@ -304,14 +358,20 @@ class GrblSender:
         """Envoie tout le G-code ligne par ligne. Retourne un bilan."""
         lines = clean_lines(gcode)
         total = len(lines)
-        for i, line in enumerate(lines):
-            if should_stop and should_stop():
-                self.soft_reset()
-                return {"stopped": True, "sent": i, "total": total}
-            self.send_line(line)
-            if progress:
-                progress(i + 1, total)
-        return {"stopped": False, "sent": total, "total": total}
+        self._quiet = True              # flux : on ne journalise pas ligne a ligne
+        try:
+            for i, line in enumerate(lines):
+                if should_stop and should_stop():
+                    self.soft_reset()
+                    return {"stopped": True, "sent": i, "total": total}
+                self.send_line(line)
+                if progress:
+                    progress(i + 1, total)
+            return {"stopped": False, "sent": total, "total": total}
+        finally:
+            # PIEGE (relecture 13.10.2026) : une erreur GRBL en plein flux
+            # laissait le terminal muet pour le reste de la session.
+            self._quiet = False
 
     # ---- commandes temps réel ---------------------------------------------- #
     def status(self) -> str:
@@ -332,12 +392,15 @@ class GrblSender:
         return "?"
 
     def feed_hold(self) -> None:
+        self._holding = True
         self._write(b"!")
 
     def resume(self) -> None:
+        self._holding = False
         self._write(b"~")
 
     def soft_reset(self) -> None:
+        self._holding = False
         self._write(b"\x18")
         self._drain()
 
@@ -356,9 +419,45 @@ class GrblSender:
         """Définit la position actuelle comme origine de travail (0,0)."""
         return self.send_line("G10 L20 P1 X0 Y0")
 
+    def machine_space(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Plage de coordonnees MACHINE utilisable par axe : ((x0, x1), (y0, y1)).
+
+        PIEGE (relecture 13.10.2026) : un GRBL classique fait son homing au
+        coin MAX et travaille en coordonnees NEGATIVES (MPos de -course a 0,
+        G54 = -400,-415) ; d'autres configurations (FluidNC selon le YAML)
+        travaillent en positif (0 a course). L'ancien controle supposait le
+        positif : sur une machine en negatif il refusait TOUS les jobs, et la
+        « correction » (G54 a 0,0) placait l'origine de travail au coin de
+        butee -> job physiquement hors enveloppe.
+
+        Heuristique : en espace positif un decalage de travail est toujours
+        >= 0 ; un G54 franchement negatif signe donc l'espace negatif. A
+        verifier sur une machine inconnue avec ``$#`` et ``?``.
+        """
+        tx, ty = self.max_travel()
+        ox, oy = self.work_offset()
+        neg = ox < -1.0 or oy < -1.0
+        return ((-tx, 0.0) if neg else (0.0, tx), (-ty, 0.0) if neg else (0.0, ty))
+
+    def clear_work_offset(self) -> str:
+        """Remet l'origine de travail (G54) sur le COIN BAS de l'espace machine.
+
+        ``G10 L2 P1`` fixe l'origine du repere 1 en coordonnees machine absolues
+        (a ne pas confondre avec ``G10 L20`` qui la place a la position COURANTE).
+        En espace positif c'est 0,0 ; en espace negatif c'est (-course, -course),
+        de sorte que les coordonnees de travail (positives) restent dans
+        l'enveloppe. Utile quand un ancien « Definir 0,0 » decale tout le travail.
+        """
+        (x0, _), (y0, _) = self.machine_space()
+        return self.send_line(f"G10 L2 P1 X{x0:g} Y{y0:g}")
+
     def goto_zero(self) -> str:
         """Retour à l'origine de travail en absolu."""
         return self.send_line("G90 G0 X0 Y0")
+
+    def goto(self, x: float, y: float) -> str:
+        """Déplacement ABSOLU vers un point des coordonnées de travail."""
+        return self.send_line(f"G90 G0 X{x:.3f} Y{y:.3f}")
 
     def laser_on(self, percent: float = 1.0, max_s: int = 1000) -> str:
         """Allume le laser à faible puissance, à l'arrêt, pour repérer la position.
@@ -385,6 +484,58 @@ class GrblSender:
             return self.send_line(line)
         except GrblError:
             return "ignored"
+
+    # ---- limites machine ----------------------------------------------------- #
+    def work_offset(self) -> tuple[float, float]:
+        """Decalage de l'origine de travail G54 (X, Y) en coordonnees machine."""
+        for line in self.send_collect("$#"):
+            if line.startswith("[G54:"):
+                vals = line.strip("[]").split(":", 1)[1].split(",")
+                return (float(vals[0]), float(vals[1]))
+        return (0.0, 0.0)
+
+    def max_travel(self) -> tuple[float, float]:
+        """Course machine configuree ($130, $131), en mm. (0, 0) si inconnue."""
+        tr = {}
+        for line in self.send_collect("$$"):
+            k, _, v = line.partition("=")
+            if k.strip() in ("$130", "$131"):
+                try:
+                    tr[k.strip()] = float(v)
+                except ValueError:
+                    pass
+        return (tr.get("$130", 0.0), tr.get("$131", 0.0))
+
+    def out_of_travel(self, bounds) -> str:
+        """Verifie qu'un job tient dans la course, OFFSET DE TRAVAIL COMPRIS.
+
+        Sans ce controle la machine part, grave, puis s'arrete en ALARM:2 au
+        premier point hors course -- avec une plaque deja entamee.
+        ``bounds`` = (minx, miny, maxx, maxy) en coordonnees de TRAVAIL.
+        Renvoie un message d'explication, ou "" si tout va bien.
+        """
+        if not bounds:
+            return ""
+        tx, ty = self.max_travel()
+        if not tx or not ty:
+            return ""                       # course inconnue : on ne bloque pas
+        ox, oy = self.work_offset()
+        (x0, x1), (y0, y1) = self.machine_space()
+        minx, miny, maxx, maxy = bounds
+        bad = []
+        if ox + maxx > x1 + 1e-6 or ox + minx < x0 - 1e-6:
+            bad.append(f"X {ox + minx:.0f}..{ox + maxx:.0f} mm (course {x0:.0f}..{x1:.0f})")
+        if oy + maxy > y1 + 1e-6 or oy + miny < y0 - 1e-6:
+            bad.append(f"Y {oy + miny:.0f}..{oy + maxy:.0f} mm (course {y0:.0f}..{y1:.0f})")
+        if not bad:
+            return ""
+        return ("Le job sort de la course machine : " + " et ".join(bad) + "."
+                + chr(10) + chr(10)
+                + f"Origine de travail decalee de X{ox:+.0f} Y{oy:+.0f}. "
+                + "Soit remettez cette origine a zero (Home puis Definir 0,0 au "
+                + "point d origine machine), soit mettez Position X/Y a 0 dans "
+                + "le logiciel.")
+
 
     # ---- carte SD FluidNC --------------------------------------------------- #
     def send_collect(self, line: str) -> list[str]:

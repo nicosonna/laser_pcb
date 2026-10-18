@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import tarfile
 import tempfile
+import threading
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from pathlib import Path
 from ..geometry import Hole, LabeledCopper
 from .. import geometry as geo
 from .. import odb
+from .. import drawing as dr
 from .. import gcode as gc
 from .. import toolpath as tp
 from ..project import (LayerConfig, Project, MODE_HYBRID, MODE_CENTERLINE,
@@ -36,6 +38,14 @@ _COPPER_PATTERNS = {
     "top": ["*opper_top*.gbr", "*F_Cu*.gbr", "*-F?Cu*.gbr", "*.gtl"],
     "bottom": ["*opper_bottom*.gbr", "*B_Cu*.gbr", "*-B?Cu*.gbr", "*.gbl"],
 }
+# Serigraphie : encombrement des composants et leurs noms. Fusion :
+# silkscreen_top.gbr ; KiCad : xxx-F_Silkscreen.gbr ; Protel : .gto / .gbo
+_SILK_PATTERNS = {
+    "top": ["*ilkscreen_top*.gbr", "*F_Silkscreen*.gbr", "*F?Silkscreen*.gbr",
+            "*.gto"],
+    "bottom": ["*ilkscreen_bottom*.gbr", "*B_Silkscreen*.gbr",
+               "*B?Silkscreen*.gbr", "*.gbo"],
+}
 _PROFILE_PATTERNS = ["profile.gbr", "*rofile*.gbr", "*Edge_Cuts*.gbr", "*Edge?Cuts*.gbr",
                      "*outline*.gbr", "*.gko", "*.gm1"]
 
@@ -53,6 +63,14 @@ class Session:
     _workdir: Path | None = None
     _expand_cache: dict = field(default_factory=dict)  # cache cuivre élargi
     _pads_cache: dict = field(default_factory=dict)    # cache pads (zones de soudure)
+    _silk_cache: dict = field(default_factory=dict)    # cache serigraphie
+    _items_cache: tuple | None = None   # (cle de reglages, parcours) : evite de tout
+                                        # recalculer entre apercu, brulure et export
+    # Un SEUL calcul lourd a la fois : l'apercu, l'apercu brulure, l'export et les
+    # boutons d'etape tournent chacun dans leur thread et partagent cette session.
+    # Deux calculs concurrents se marchaient dessus (caches mutes en parallele,
+    # geometries partagees) -> plantage natif, sans trace Python.
+    _compute_lock: object = field(default_factory=threading.RLock, repr=False)
     _origin_shift: tuple = (0.0, 0.0)  # translation appliquée à l'import (KiCad -> (0,0))
 
     # ------------------------------------------------------------------ #
@@ -75,6 +93,7 @@ class Session:
             name = path.stem.removesuffix(".tar")   # nom du zip, pas du dossier temp
             path = _extract_archive(path)
         kind = self.detect_kind(path)
+        self._drc_cache = None
         self.source_root = path
         self.project.source_kind = kind
         self.project.name = name if path.name.startswith("lpcb_") else path.name
@@ -83,6 +102,7 @@ class Session:
         else:
             self._load_odb(path)
         self._normalize_origin()
+        self.center_on_bed()        # une piece importee est centree sur le plateau
         self.project.embed_directory(path)
 
     def _load_gerber(self, root: Path) -> None:
@@ -140,6 +160,7 @@ class Session:
         self.holes = [Hole(h.x + dx, h.y + dy, h.diameter) for h in self.holes]
         self._expand_cache.clear()
         self._pads_cache.clear()            # les pads bruts seraient décalés
+        self._silk_cache.clear()
 
     def _load_odb(self, root: Path) -> None:
         self.board = odb.load_outline(root)
@@ -195,7 +216,15 @@ class Session:
         if not removed.is_empty:
             fallback = orig.buffer(kerf / 2, join_style="mitre", mitre_limit=5.0).boundary
             out += tp._explode_lines(fallback.intersection(removed.buffer(kerf)))
-        return out
+        if not out:
+            return out
+        # On RECOLLE les fragments contigus. Le decoupage ci-dessus eclate un anneau
+        # en milliers de morceaux (surtout avec une marge cuivre), et Douglas-Peucker
+        # doit conserver les EXTREMITES de chaque morceau : d'ou des dizaines de
+        # milliers de micro-segments que la simplification ne peut pas enlever.
+        from shapely.ops import linemerge
+        merged = linemerge(out)
+        return tp._explode_lines(merged)
 
     def _layer_items_tagged(self, layer: LoadedLayer):
         """Comme ``layer_items`` mais chaque item porte une **catégorie** en 4e position
@@ -238,7 +267,14 @@ class Session:
                                       cal.v_fast))
                 tight = f_tight.result()
                 if tight:
-                    paths = [tp.LineString(s.coords) for s in tight]
+                    # Les passes centrees sont des aretes de Voronoi : des milliers
+                    # de troncons de 2 points. On CHAINE les troncons contigus en
+                    # polylignes -- memes traits graves, mais Douglas-Peucker peut
+                    # enfin travailler dessus (un trace de 2 points est intouchable)
+                    # et la machine arrete de hesiter sur des micro-segments.
+                    from shapely.ops import linemerge
+                    paths = tp._explode_lines(
+                        linemerge([tp.LineString(s.coords) for s in tight]))
                     items += _tag(gc.items_from_paths(paths, cfg.speed, cfg.power),
                                   "tight") * passes
                 for fut, speed in fills:
@@ -269,6 +305,11 @@ class Session:
                             continue
                         clean.append(tp.LineString(poly.exterior.coords))
                         clean += [tp.LineString(r.coords) for r in poly.interiors]
+                    # On ecarte ici les bavures plus courtes que le faisceau : le
+                    # spot les couvre deja, et leurs extremites fabriquent des
+                    # segments de quelques microns. Filtre LOCAL au nettoyage :
+                    # surtout pas sur les passes centrees (courtes mais vitales).
+                    clean = [g for g in clean if g.length >= kerf / 2]
                     items += _tag(gc.items_from_paths(clean, cfg.speed, cfg.power),
                                   "fill")
             return items
@@ -322,6 +363,26 @@ class Session:
             return items
         return []
 
+    def drc_summary(self) -> dict:
+        """Courts-circuits inter-nets par calque, d'apres le DRC de toolpath.
+
+        PIEGE (session de test 13.10.2026) : le DRC existait mais n'etait
+        appele nulle part dans l'interface — un court-circuit dans le Gerber
+        partait en gravure sans un mot. Calcule une fois par import (cache),
+        a appeler hors du fil graphique (quelques dixiemes de seconde).
+        """
+        cache = getattr(self, "_drc_cache", None)
+        if cache is None:
+            cache = {}
+            for layer in self.layers:
+                try:
+                    r = tp.drc(layer.labeled)
+                    cache[layer.config.name] = len(r.real_shorts)
+                except Exception:  # noqa: BLE001
+                    cache[layer.config.name] = -1       # inconnu
+            self._drc_cache = cache
+        return cache
+
     def active_layers(self) -> list[LoadedLayer]:
         """Calques de la face active uniquement (on grave une face à la fois)."""
         return [l for l in self.layers if l.config.role == self.active_side]
@@ -337,7 +398,45 @@ class Session:
         """Items G-code (coords, feed, power) de la face active — API stable (3-uplets)."""
         return [(c, f, p) for (c, f, p, _k) in self.active_items_tagged()]
 
+    def _items_key(self) -> tuple:
+        """Signature des reglages qui changent les parcours (le cache en depend).
+
+        La position plateau et le miroir n en font PAS partie : ils s appliquent
+        apres coup dans ``placed_items``, sans recalcul."""
+        p = self.project
+        return (self.active_side, round(p.kerf, 6), round(p.copper_margin, 6),
+                p.hole_enabled, p.hole_scale_percent, p.hole_min_diameter,
+                p.hole_speed, p.hole_power,
+                p.hole_passes, p.cut_outline_enabled, p.cut_outline_speed,
+                p.cut_outline_power, p.cut_outline_passes, p.cut_outline_margin,
+                tuple(sorted(p.calibration.items())),
+                # Le DESSIN fait partie des parcours : sans sa signature ici, une
+                # forme modifiee resterait invisible, servie par le cache.
+                p.drawing_enabled,
+                tuple((s.kind, s.layer, round(s.rotation, 6),
+                       repr(sorted(s.params.items()))) for s in p.shapes),
+                tuple((c.id, c.enabled, c.mode, c.passes, c.speed, c.power)
+                      for c in p.work_layers),
+                tuple((l.config.name, l.config.enabled, l.config.mode, l.config.passes,
+                       l.config.speed, l.config.power, l.config.adaptive,
+                       l.config.rings, l.config.crosshatch) for l in self.layers))
+
+    def invalidate_items(self) -> None:
+        """Oublie les parcours calcules (a appeler quand la geometrie change)."""
+        self._items_cache = None
+
     def active_items_tagged(self) -> list:
+        """Items de la face active, avec cache : l apercu, l apercu brulure et
+        l export se partagent le meme calcul tant que les reglages ne bougent pas."""
+        key = self._items_key()
+        with self._compute_lock:
+            if self._items_cache is not None and self._items_cache[0] == key:
+                return self._items_cache[1]
+            items = self._compute_active_items_tagged()
+            self._items_cache = (key, items)
+            return items
+
+    def _compute_active_items_tagged(self) -> list:
         """Items de la face active **avec catégorie** (contour / fill / hole / cut),
         NON miroités. Sert au G-code (on ignore la catégorie) ET à l'aperçu couleur.
 
@@ -348,25 +447,46 @@ class Session:
             if layer.config.enabled:
                 items.extend(self._layer_items_tagged(layer))
         p = self.project
-        if p.hole_enabled and self.holes:
-            rings = tp.hole_circles(self.holes, p.hole_scale_percent)
-            hole_items = _tag(gc.items_from_paths(rings, p.hole_speed, p.hole_power), "hole")
-            for _ in range(max(1, p.hole_passes)):
-                items.extend(hole_items)
-        # Découpe du contour de carte (FR4), optionnelle : pleine puissance, N passes.
-        # ``cut_outline_margin`` garde X mm de FR4 autour du circuit (défaut 2 mm).
-        if p.cut_outline_enabled and self.board is not None and not self.board.is_empty:
-            from shapely.geometry import LineString
-            b = self.board
-            if p.cut_outline_margin:
-                b = b.buffer(p.cut_outline_margin, join_style="mitre", mitre_limit=5.0)
-            lines = []
-            for poly in getattr(b, "geoms", [b]):
-                lines.append(LineString(poly.exterior.coords))
-                lines += [LineString(r.coords) for r in poly.interiors]
-            cut = _tag(gc.items_from_paths(lines, p.cut_outline_speed, p.cut_outline_power), "cut")
-            items += cut * max(1, p.cut_outline_passes)
+        if p.hole_enabled:
+            items += self.hole_items()
+        if p.cut_outline_enabled:
+            items += self.cut_items()
+        if p.drawing_enabled:
+            items += self.drawing_items_tagged()
         return items
+
+    def hole_items(self) -> list:
+        """Perçages, INDÉPENDAMMENT de la case « Trous » : le bouton dédié de
+        l'onglet d'envoi doit pouvoir les lancer à tout moment. Aucun calcul de
+        parcours : c'est instantané même sur une carte lourde."""
+        p = self.project
+        if not self.holes:
+            return []
+        rings = tp.hole_circles(self.holes, p.hole_scale_percent,
+                                skip_below=p.hole_min_diameter)
+        if rings.is_empty:
+            return []
+        one = _tag(gc.items_from_paths(rings, p.hole_speed, p.hole_power), "hole")
+        return one * max(1, p.hole_passes)
+
+    def cut_items(self) -> list:
+        """Découpe du contour (FR4), INDÉPENDAMMENT de la case « Découpe » :
+        pleine puissance, N passes, ``cut_outline_margin`` mm de FR4 conservés
+        autour du circuit. Instantané également."""
+        p = self.project
+        if self.board is None or self.board.is_empty:
+            return []
+        from shapely.geometry import LineString
+        b = self.board
+        if p.cut_outline_margin:
+            b = b.buffer(p.cut_outline_margin, join_style="mitre", mitre_limit=5.0)
+        lines = []
+        for poly in getattr(b, "geoms", [b]):
+            lines.append(LineString(poly.exterior.coords))
+            lines += [LineString(r.coords) for r in poly.interiors]
+        one = _tag(gc.items_from_paths(lines, p.cut_outline_speed, p.cut_outline_power),
+                   "cut")
+        return one * max(1, p.cut_outline_passes)
 
     def estimate_minutes(self, items=None) -> float:
         """Durée de gravure estimée (min) de la face active, trajets à vide inclus.
@@ -415,30 +535,52 @@ class Session:
         if p.finish_pads:
             pads = self.pads_for(self.active_side)
             if pads is not None and not pads.is_empty:
-                if p.finish_pads_inset > 0:
-                    # léger retrait : la peinture est enlevée STRICTEMENT sur le
-                    # cuivre du pad (pas de débordement sur le FR4/les voisins)
-                    pads = pads.buffer(-p.finish_pads_inset)
-                if not pads.is_empty:
-                    fill_geoms.append(pads)
+                from shapely.affinity import scale as _scale
+                from shapely.geometry import MultiPolygon as _MP
+                k = 1.0 - max(0.0, p.finish_pads_shrink) / 100.0
+                tool = []
+                for g in getattr(pads, "geoms", [pads]):
+                    if g.geom_type != "Polygon" or g.is_empty:
+                        continue
+                    # 1. retrait en POURCENTAGE : la peinture conservée sur le
+                    #    pourtour du pad fait vernis épargne, comme un vrai circuit.
+                    target = _scale(g, k, k, origin="centroid") if k < 1 else g
+                    # 2. compensation du FAISCEAU : le trait brûle kerf/2 de chaque
+                    #    côté de son centre. Sans cette érosion, le parcours suivait
+                    #    le bord de la zone visée et débordait de 50 um — soit bien
+                    #    plus que les 12 um de vernis d'un petit pad, qui était donc
+                    #    purement et simplement annulé.
+                    eroded = target.buffer(-kerf / 2.0)
+                    for part in getattr(eroded, "geoms", [eroded]):
+                        if part.geom_type == "Polygon" and not part.is_empty:
+                            tool.append(part)
+                    if eroded.is_empty:
+                        # pad plus petit que le faisceau : on le brûle d'un point,
+                        # plutôt que de le sauter (il faut bien pouvoir souder)
+                        tool.append(target)
+                if tool:
+                    fill_geoms.append((_MP(tool), True))
         if p.finish_text.strip():
             txt = tp.text_polygons(p.finish_text, p.finish_text_height,
                                    p.finish_text_x, p.finish_text_y)
             if not txt.is_empty:
-                fill_geoms.append(txt)
-        for geom in fill_geoms:
-            rings = [tp.LineString(r.coords)
-                     for poly in getattr(geom, "geoms", [geom])
-                     if poly.geom_type == "Polygon"
-                     for r in [poly.exterior, *poly.interiors]]
-            items += _tag(gc.items_from_paths(rings, p.finish_speed, p.finish_power),
-                          "contour")
-            items += _tag(gc.items_from_paths(tp.hatch(geom, spacing=kerf),
+                fill_geoms.append((txt, False))     # traits fins : pas de contour
+        for geom, outline in fill_geoms:
+            if outline:
+                rings = [tp.LineString(r.coords)
+                         for poly in getattr(geom, "geoms", [geom])
+                         if poly.geom_type == "Polygon"
+                         for r in [poly.exterior, *poly.interiors]]
+                items += _tag(gc.items_from_paths(rings, p.finish_speed,
+                                                  p.finish_power), "contour")
+            spacing = kerf if outline else kerf * 0.8
+            items += _tag(gc.items_from_paths(tp.hatch(geom, spacing=spacing),
                                               p.finish_speed, p.finish_power), "fill")
         items *= max(1, p.finish_passes)
         # Trous : PERÇAGE laser (N passes pleines, comme la découpe) — après la peinture
         if p.finish_holes and self.holes:
-            circles = tp.hole_circles(self.holes, p.hole_scale_percent)
+            circles = tp.hole_circles(self.holes, p.hole_scale_percent,
+                                      skip_below=p.hole_min_diameter)
             hole_items = _tag(gc.items_from_paths(circles, p.hole_speed, p.hole_power),
                               "hole")
             items += hole_items * max(1, p.finish_hole_passes)
@@ -458,7 +600,8 @@ class Session:
         return items
 
     def generate_finish_gcode(self, config: gc.GCodeConfig | None = None,
-                              stats: dict | None = None) -> str:
+                              stats: dict | None = None,
+                              include_cut: bool = True) -> str:
         """G-code de finition (face active).
 
         Découpe du pourtour ACTIVE : après le bain, la plaque est déjà découpée —
@@ -467,7 +610,10 @@ class Session:
         plateau) : définir 0,0 sur le coin bas-gauche de la plaque et lancer.
         Sinon : mêmes coordonnées que la gravure (même zéro machine).
         """
-        tagged = self.finish_items_tagged()
+        tagged = [it for it in self.finish_items_tagged()
+                  if include_cut or it[3] != "cut"]
+        if not tagged:
+            return ""
         p = self.project
         title = f"{self.project.name}_{self.active_side}_finition"
         # Repère : par DÉFAUT même zéro machine que la gravure (le centrage plateau
@@ -511,6 +657,7 @@ class Session:
         from shapely.geometry import LineString
         from shapely.ops import unary_union
         coords = [c for c, _f, _p in self.active_items() if len(c) >= 2]
+        # (active_items prend deja le verrou de calcul)
         if not coords:
             return None
         lines = np.empty(len(coords), dtype=object)
@@ -551,17 +698,42 @@ class Session:
             return None
         return (min(xs), min(ys), max(xs), max(ys))
 
+    def piece_origin(self) -> tuple[float, float] | None:
+        """Coin bas-gauche de la PIÈCE, en coordonnées de travail.
+
+        C'est le point d'où part la gravure une fois la carte positionnée sur le
+        plateau — à ne pas confondre avec le 0,0 machine, dont il est décalé par
+        ``project.origin`` (centrage). Même emprise que le cadrage.
+        """
+        b = self.content_bounds()
+        if b is None:
+            return None
+        ox, oy = self.project.origin
+        # Emprise du TRAVAIL, sans la marge de decoupe : c est d ici que part
+        # la gravure. (Le cadrage, lui, encadre la PLAQUE a positionner.)
+        return (b[0] + ox, b[1] + oy)
+
     def frame_gcode(self, power: float = 1.0, feed: float = 3000.0,
                     loops: int = 2, max_s: int = 1000) -> str:
         """G-code de **cadrage** : trace le rectangle englobant du job à faible
         puissance (visible mais sans graver), pour positionner la plaque.
 
         Contrairement au bouton « Frame » de la machine — qui, sur un parcours
-        vectoriel, rejoue tout le tracé — ceci ne fait QUE les 4 coins."""
-        b = self.job_bounds()
+        vectoriel, rejoue tout le tracé — ceci ne fait QUE les 4 coins.
+
+        On encadre l'emprise de la **plaque** (contour de carte + marge de découpe),
+        pas celle des parcours : c'est la plaque qu'on positionne, et surtout cela
+        n'exige AUCUN calcul de parcours — le cadrage reste instantané même sur une
+        carte lourde, alors que passer par ``job_bounds`` figeait l'interface
+        plusieurs minutes.
+        """
+        b = self.plate_bounds()
+        if b is None:
+            b = self.job_bounds()
         if b is None:
             return ""
-        minx, miny, maxx, maxy = b
+        ox, oy = self.project.origin
+        minx, miny, maxx, maxy = (b[0] + ox, b[1] + oy, b[2] + ox, b[3] + oy)
         s = int(round(max(0.0, power) / 100.0 * max_s))
         corners = [(maxx, miny), (maxx, maxy), (minx, maxy), (minx, miny)]
         lines = [
@@ -619,14 +791,27 @@ class Session:
         return gc.build(placed, config, title=title, prelude_items=prelude,
                         stats=stats)
 
+    def content_bounds(self) -> tuple | None:
+        """Emprise du TRAVAIL : la carte si elle existe, sinon le dessin.
+
+        C'est elle qui permet de travailler sans PCB du tout — plaque, boîtier,
+        pochoir — là où tout le logiciel supposait une carte importée.
+        """
+        if self.board is not None and not self.board.is_empty:
+            return self.board.bounds
+        g = self.drawing_geometry()
+        return None if g is None or g.is_empty else g.bounds
+
     def plate_bounds(self) -> tuple[float, float, float, float] | None:
-        """Emprise de la PLAQUE nécessaire : la carte, élargie de la marge de
+        """Emprise de la PLAQUE nécessaire : le travail, élargi de la marge de
         découpe quand la découpe du pourtour est activée."""
-        if self.board is None or self.board.is_empty:
+        b = self.content_bounds()
+        if b is None:
             return None
-        minx, miny, maxx, maxy = self.board.bounds
-        p = self.project
-        m = p.cut_outline_margin if p.cut_outline_enabled else 0.0
+        minx, miny, maxx, maxy = b
+        # Le bouton « Decouper » coupe TOUJOURS avec la marge : c'est elle la
+        # plaque reelle, que la case « Decoupe » du job soit cochee ou non.
+        m = max(0.0, self.project.cut_outline_margin)
         return (minx - m, miny - m, maxx + m, maxy + m)
 
     def fits_on_bed(self) -> bool:
@@ -637,11 +822,170 @@ class Session:
         return (b[2] - b[0] <= self.project.bed_width
                 and b[3] - b[1] <= self.project.bed_height)
 
+    # Étapes lançables séparément depuis l'onglet d'envoi. Les réglages viennent
+    # de l'onglet Calques ; les CASES À COCHER n'ont volontairement aucun effet ici
+    # (elles disent ce qui part dans le job complet, pas ce qu'on peut lancer).
+    PHASES = {
+        "gravure": "masque (contours, remplissage, passes centrées)",
+        "trous": "perçages",
+        "decoupe": "découpe du contour (FR4)",
+        "finition": "empreintes de composants (pads, après perchlorure)",
+        "serigraphie": "encombrement et noms des composants (marquage léger)",
+        "dessin": "formes, lignes et textes dessinés",
+    }
+
+    def silk_geometry(self, role: str):
+        """Encombrement des composants + leurs noms, pour la face ``role``.
+
+        Gerber : on prend la couche SÉRIGRAPHIE du projet — c'est exactement ce
+        qu'on veut (contours de boîtiers et références), déjà dessiné par l'EDA.
+        ODB++ : pas de couche équivalente, on la reconstruit depuis les composants
+        (rectangle d'encombrement + référence vectorisée).
+        """
+        from shapely.geometry import MultiPolygon
+        if role in self._silk_cache:
+            return self._silk_cache[role]
+        geom = MultiPolygon()
+        root = self.source_root
+        try:
+            if root is not None and self.project.source_kind == "gerber":
+                gdir = root if list(root.glob("*.gbr")) else root / "GerberFiles"
+                f = _first(gdir, _SILK_PATTERNS[role])
+                if f:
+                    geom = geo.load_copper(f, role).geometry
+            elif root is not None:
+                geom = self._silk_from_components(role)
+        except Exception:
+            pass                         # pas de sérigraphie : le bouton sera sans effet
+        dx, dy = self._origin_shift
+        if (dx or dy) and not geom.is_empty:
+            from shapely.affinity import translate
+            geom = translate(geom, dx, dy)
+        self._silk_cache[role] = geom
+        return geom
+
+    def _silk_from_components(self, role: str):
+        """ODB++ : rectangle d'encombrement de chaque composant + sa référence."""
+        from shapely.affinity import rotate as _rot, translate as _tr
+        from shapely.geometry import box as _box
+        from shapely.ops import unary_union
+        from .. import bom
+        parts = []
+        for c in bom.load_components(self.source_root):
+            if c.side != role:
+                continue
+            w = h = 0.0
+            if c.size:                             # ex. "4.4 × 1.8 mm"
+                try:
+                    a, b = c.size.replace(" mm", "").split("\u00d7")
+                    w, h = float(a), float(b)
+                except ValueError:
+                    pass
+            if w > 0 and h > 0:
+                ring = _box(-w / 2, -h / 2, w / 2, h / 2).exterior.buffer(0.08)
+                parts.append(_tr(_rot(ring, c.rot, origin=(0, 0)), c.x, c.y))
+            txt = tp.text_polygons(c.refdes, self.project.silk_text_height)
+            if not txt.is_empty:
+                minx, miny, maxx, maxy = txt.bounds
+                parts.append(_tr(txt, c.x - (maxx - minx) / 2,
+                                 c.y - (maxy - miny) / 2))
+        return unary_union(parts) if parts else _box(0, 0, 0, 0)
+
+    def silk_items(self) -> list:
+        """Marquage : contour + remplissage de la sérigraphie, puissance faible."""
+        p = self.project
+        geom = self.silk_geometry(self.active_side)
+        if geom is None or geom.is_empty:
+            return []
+        # PAS de tracé de contour ici, contrairement aux pads : les traits de
+        # sérigraphie font ~142 um pour un faisceau de 100 um. Suivre leurs DEUX
+        # bords pose deux brûlures qui débordent de 50 um de chaque côté — les
+        # contre-formes des lettres (R, 8, 0) se referment et le texte devient
+        # illisible. Un simple remplissage suffit à couvrir un trait aussi fin.
+        items = _tag(gc.items_from_paths(tp.hatch(geom, spacing=p.kerf * 0.8),
+                                         p.silk_speed, p.silk_power), "fill")
+        return items * max(1, p.silk_passes)
+
+    # ---- dessin vectoriel ---------------------------------------------------- #
+    def work_layers(self) -> list:
+        """Calques de travail du dessin, créés à la première utilisation."""
+        if not self.project.work_layers:
+            self.project.work_layers = dr.default_layers()
+        return self.project.work_layers
+
+    def layer_by_id(self, layer_id: str):
+        return next((c for c in self.work_layers() if c.id == layer_id), None)
+
+    def drawing_items_tagged(self) -> list:
+        """Parcours des objets dessinés, catégorie « dessin ».
+
+        INDÉPENDANT de la case du job complet : le bouton d'étape doit pouvoir
+        les lancer seuls, comme les trous ou la découpe.
+        """
+        p = self.project
+        if not p.shapes:
+            return []
+        out = []
+        for shape in p.shapes:
+            layer = self.layer_by_id(shape.layer)
+            if layer is None or not layer.enabled:
+                continue
+            out += _tag(dr.shape_items(shape, layer, p.kerf), "dessin")
+        return out
+
+    def drawing_geometry(self):
+        """Union des objets dessinés — pour l'aperçu et l'emprise."""
+        from shapely.ops import unary_union
+        geoms = [s.geometry() for s in self.project.shapes]
+        geoms = [g for g in geoms if g is not None and not g.is_empty]
+        return unary_union(geoms) if geoms else None
+
+    def generate_phase_gcode(self, phase: str,
+                             config: gc.GCodeConfig | None = None) -> str:
+        """G-code d'UNE étape, placé comme le job complet (miroir + plateau)."""
+        if phase == "finition":
+            # PIEGE (relecture 13.10.2026) : la finition passait par
+            # placed_items et ignorait ``finish_ref_plate_corner`` : avec le
+            # repere « coin de la plaque » coche, le bouton envoyait le job
+            # ~150 mm a cote de l'export. Un seul chemin pour les deux.
+            return self.generate_finish_gcode(config, include_cut=False)
+        with self._compute_lock:
+            return self._phase_gcode(phase, config)
+
+    def _phase_gcode(self, phase: str, config=None) -> str:
+        if phase == "gravure":
+            items = [it for it in self.active_items_tagged()
+                     if it[3] in ("contour", "tight", "fill")]
+        elif phase == "trous":
+            items = self.hole_items()
+        elif phase == "decoupe":
+            items = self.cut_items()
+        elif phase == "finition":
+            items = [it for it in self.finish_items_tagged() if it[3] != "cut"]
+        elif phase == "serigraphie":
+            items = self.silk_items()
+        elif phase == "dessin":
+            items = self.drawing_items_tagged()
+        else:
+            raise ValueError(f"étape inconnue : {phase}")
+        if not items:
+            return ""
+        config = config or gc.GCodeConfig(
+            simplify_tolerance=self.project.simplify_tolerance)
+        if phase in ("decoupe", "trous"):
+            # tours successifs sur la même figure : on garde l'ordre tel quel
+            from dataclasses import replace
+            config = replace(config, optimize_order=False)
+        placed = [(c, f, pw) for (c, f, pw, *_k) in self.placed_items(items)]
+        title = f"{self.project.name}_{self.active_side}_{phase}"
+        return gc.build(placed, config, title=title)
+
     def center_on_bed(self) -> None:
         """Positionne le PCB au centre du plateau (règle ``project.origin``)."""
-        if self.board is None:
+        b = self.content_bounds()
+        if b is None:
             return
-        minx, miny, maxx, maxy = self.board.bounds
+        minx, miny, maxx, maxy = b
         w, h = maxx - minx, maxy - miny
         self.project.origin = ((self.project.bed_width - w) / 2 - minx,
                                (self.project.bed_height - h) / 2 - miny)

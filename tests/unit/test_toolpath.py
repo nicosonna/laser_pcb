@@ -71,6 +71,17 @@ def test_hybrid_isolation_single_pass_in_tight_gap():
     assert not rings.is_empty                 # contours offset ailleurs
 
 
+def test_hole_circles_skip_below():
+    """Sous le seuil de Ø nominal, un trou n'est pas percé (vias trop petits)."""
+    from laserpcb.geometry import Hole
+    holes = [Hole(0, 0, 0.8), Hole(5, 0, 1.0), Hole(10, 0, 2.0), Hole(15, 0, 2.7)]
+    assert len(tp.hole_circles(holes).geoms) == 4               # défaut : tout
+    rings = tp.hole_circles(holes, skip_below=2.0)
+    xs = sorted(round(r.centroid.x) for r in rings.geoms)
+    assert xs == [10, 15]                                       # 2,0 mm pile est gardé
+    assert tp.hole_circles(holes[:2], skip_below=2.0).is_empty  # que des vias : rien
+
+
 def test_hole_circles_scaled():
     """Le pourcentage rétrécit le Ø du trou gravé (ex. -30 % -> 70 %)."""
     from laserpcb.geometry import Hole

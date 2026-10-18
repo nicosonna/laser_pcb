@@ -31,6 +31,12 @@ class GCodeConfig:
     max_optimize: int = 20000    # au-delà, on n'optimise pas (trop long)
     return_to_origin: bool = True  # G0 X0 Y0 en fin de programme
     emit_laser_mode_setting: bool = False  # écrire "$32=1" dans le fichier (voir build)
+    min_path_length: float = 0.0           # mm : tracé plus court que ça = ignoré.
+                                           # DÉSACTIVÉ par défaut : les passes
+                                           # centrées des canaux étroits sont courtes
+                                           # par nature et empêchent les courts-
+                                           # circuits — les supprimer serait grave.
+                                           # Le tri se fait par catégorie en amont.
     simplify_tolerance: float = 0.006      # mm : Douglas-Peucker par tracé avant
                                            # écriture (demi-pas moteur à 80 pas/mm).
                                            # 0 = aucune simplification.
@@ -155,24 +161,34 @@ def _orient(seq):
 # --------------------------------------------------------------------------- #
 # Simplification des tracés (avant écriture)
 # --------------------------------------------------------------------------- #
-def simplify_items(items, tolerance: float):
+def simplify_items(items, tolerance: float, min_length: float = 0.0):
     """Douglas-Peucker sur CHAQUE tracé (géométrie, pas le texte du G-code).
 
     Les extrémités sont toujours conservées : l'ordre des tracés, les G0 et les
     vitesses/puissances restent identiques. Un tracé qui s'effondrerait (plus
     petit que la tolérance) est gardé tel quel plutôt que supprimé : il
     correspond à une brûlure réelle.
+
+    ``min_length`` écarte en revanche les tracés dont la LONGUEUR TOTALE est
+    inférieure au faisceau : le spot les couvre déjà entièrement, mais leurs
+    extrémités (que Douglas-Peucker doit conserver) fabriquent des segments de
+    quelques microns que la machine ne sait pas exécuter.
     """
-    if tolerance <= 0:
+    if tolerance <= 0 and min_length <= 0:
         return list(items)
+    import numpy as _np
     from shapely.geometry import LineString
     out = []
     for coords, *rest in items:
-        if len(coords) > 2:
+        if tolerance > 0 and len(coords) > 2:
             simple = list(LineString(coords).simplify(
                 tolerance, preserve_topology=False).coords)
             if len(simple) >= 2:
                 coords = simple
+        if min_length > 0 and len(coords) >= 2:
+            a = _np.asarray(coords, dtype=float)
+            if float(_np.hypot(*(a[1:] - a[:-1]).T).sum()) < min_length:
+                continue        # trace plus court que le faisceau : rien a graver
         out.append((coords, *rest))
     return out
 
@@ -183,6 +199,7 @@ def path_stats(items, ignore_below: float = 0.0) -> dict:
     des coordonnées : les compter fausserait l'alerte « segment trop court »."""
     n = 0
     total = 0.0
+    short = 0
     shortest = float("inf")
     for coords, *_rest in items:
         if len(coords) < 2:
@@ -194,7 +211,8 @@ def path_stats(items, ignore_below: float = 0.0) -> dict:
         nz = d[d > max(0.0, ignore_below)]
         if nz.size:
             shortest = min(shortest, float(nz.min()))
-    return {"segments": n, "length_mm": total,
+            short += int((nz < 0.01).sum())
+    return {"segments": n, "length_mm": total, "short": short,
             "shortest_mm": 0.0 if shortest == float("inf") else shortest}
 
 
@@ -260,7 +278,7 @@ def build(items, config: GCodeConfig | None = None, passes: int = 1,
     before = path_stats(items)
     # Simplification AVANT l'ordonnancement : Douglas-Peucker conserve les
     # extrémités, donc l'ordre des tracés et les G0 restent inchangés.
-    items = simplify_items(items, config.simplify_tolerance)
+    items = simplify_items(items, config.simplify_tolerance, config.min_path_length)
     after = path_stats(items, ignore_below=10.0 ** -config.precision)
     if config.optimize_order:
         items = optimize(items, config.max_optimize)
@@ -308,6 +326,7 @@ def build(items, config: GCodeConfig | None = None, passes: int = 1,
         "length_before_mm": before["length_mm"],
         "length_after_mm": after["length_mm"],
         "shortest_mm": after["shortest_mm"],
+        "short_segments": after["short"],
         "tolerance_mm": config.simplify_tolerance,
     }
     # Bilan ecrit dans l EN-TETE : ``M2`` doit rester la derniere instruction.
@@ -319,9 +338,15 @@ def build(items, config: GCodeConfig | None = None, passes: int = 1,
         f"{report['length_after_mm']/1000:.2f} m",
         f"; plus petit segment : {report['shortest_mm']:.4f} mm",
     ]
-    if 0 < report["shortest_mm"] < 0.01:
-        summary.append("; ATTENTION : segment grave sous 0.01 mm "
-                       "(sous la resolution utile de la machine)")
+    ratio = (report["short_segments"] / report["segments_after"]
+             if report["segments_after"] else 0.0)
+    report["short_ratio"] = ratio
+    if ratio > 0.01:        # en dessous, trop rare pour faire hesiter la machine
+        summary.append(f"; ATTENTION : {report['short_segments']} segments "
+                       f"sous 0.01 mm ({ratio*100:.1f} %) - la machine risque d hesiter")
+    elif report["short_segments"]:
+        summary.append(f"; {report['short_segments']} segments sous 0.01 mm "
+                       f"({ratio*100:.2f} %) - negligeable")
     em.lines[2:2] = summary               # juste apres les 2 lignes de titre
     report["lines"] = len(em.lines)
     em.lines.insert(2 + len(summary), f"; lignes : {report['lines'] + 1}")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
@@ -13,7 +13,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..project import (LayerConfig, MODE_COMBINED, MODE_ISOLATION, MODE_NEGATIVE)
-from .canvas import PcbCanvas
+from . import threads
+from .canvas import PcbCanvas, make_nav_toolbar
+from .drawing_panel import DrawingPanel
+from .editor import DrawingEditor
 from .session import Session
 
 
@@ -110,20 +113,25 @@ class MainWindow(QMainWindow):
         self._debounce.timeout.connect(self._render)
         self.resize(1100, 750)
 
-        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
         central = QWidget()
         vbox = QVBoxLayout(central)
         vbox.setContentsMargins(0, 0, 0, 0)
         self.canvas = PcbCanvas()
-        self.nav = NavigationToolbar2QT(self.canvas, self)
+        self.editor = DrawingEditor(self.canvas, lambda: self.session)
+        self.editor.changed.connect(self._on_drawing_changed)
+        self.nav = make_nav_toolbar(self.canvas, self)
         vbox.addWidget(self.nav)
         vbox.addWidget(self.canvas)
         self.setCentralWidget(central)
         self._build_toolbar()
         self._build_dock()
         self._build_send_dock()
+        self._rebuild_recent()
         self._build_menu()
         self.statusBar().showMessage("Ouvrez un PCB (dossier, ZIP, TGZ) ou un projet .lpcb pour commencer.")
+        # Reconnexion a la derniere graveuse utilisee, apres l affichage de la
+        # fenetre (la liaison s ouvre dans un thread : aucun gel au demarrage).
+        QTimer.singleShot(300, self.send_panel.try_auto_connect)
 
     def _build_toolbar(self):
         tb = QToolBar("Barre principale", self)
@@ -138,6 +146,9 @@ class MainWindow(QMainWindow):
         menu.addAction("Fichier ou archive (ZIP / TGZ / TAR)…", self.open_file)
         menu.addAction("Dossier PCB (ODB++ / Gerber)…", self.import_folder)
         menu.addAction("Projet .lpcb…", self.open_project)
+        menu.addSeparator()
+        self._recent_menu = QMenu("Ouvrir un récent", menu)
+        menu.addMenu(self._recent_menu)
         open_btn.setMenu(menu)
         open_btn.clicked.connect(self.open_file)   # clic direct = fichier/archive
         tb.addWidget(open_btn)
@@ -183,7 +194,11 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Envoyer au laser", self)
         self.send_panel = SendPanel(
             get_gcode=lambda: self.session.generate_gcode(),
-            get_frame_gcode=lambda: self.session.frame_gcode(power=1.0))
+            get_frame_gcode=lambda: self.session.frame_gcode(power=1.0),
+            get_phase_gcode=lambda ph: self.session.generate_phase_gcode(ph),
+            get_side=lambda: self.session.active_side,
+            set_side=self._set_side_from_panel,
+            get_piece_origin=lambda: self.session.piece_origin())
         dock.setWidget(self.send_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         if getattr(self, "_layers_dock", None):
@@ -195,6 +210,36 @@ class MainWindow(QMainWindow):
         dock = QDockWidget("Calques", self)
         self._layers_dock = dock
         panel = QWidget(); self._panel_layout = QVBoxLayout(panel)
+
+        # --- Calques d'affichage : isoler une etape ou une couche source ---
+        from .canvas import _KIND_COLOR, _KIND_LABEL, _SRC_COLOR
+        vis_box = QGroupBox("Calques d'affichage")
+        vis_box.setToolTip("Affiche ou masque chaque couche pour inspecter le "
+                           "travail : par exemple la decoupe seule, ou la "
+                           "serigraphie sans le remplissage qui la noie.")
+        vl = QVBoxLayout(vis_box)
+        self._visible = {}
+        self._vis_boxes = {}
+        rows = [("carte", "Contour de carte", _SRC_COLOR["carte"], True),
+                ("cuivre", "Cuivre (face active)", _SRC_COLOR["cuivre"], True),
+                ("serigraphie", "Serigraphie (reperes)", _SRC_COLOR["serigraphie"], False),
+                ("pads", "Pads (zones de soudure)", _SRC_COLOR["pads"], False)]
+        rows += [(k, _KIND_LABEL[k].capitalize(), _KIND_COLOR[k], True)
+                 for k in ("contour", "tight", "fill", "hole", "cut")]
+        rows.append(("dessin", "Dessin (formes, texte)", _KIND_COLOR["dessin"], True))
+        for key, label, color, on in rows:
+            row = QHBoxLayout()
+            chip = QLabel()
+            chip.setFixedSize(14, 14)
+            chip.setStyleSheet(f"background:{color}; border:1px solid #555;")
+            box = QCheckBox(label)
+            box.setChecked(on)
+            box.toggled.connect(lambda state, k=key: self._set_visible(k, state))
+            row.addWidget(chip); row.addWidget(box, 1)
+            vl.addLayout(row)
+            self._visible[key] = on
+            self._vis_boxes[key] = box
+        self._panel_layout.addWidget(vis_box)
 
         kerf_box = QGroupBox("Général")
         kf = QFormLayout(kerf_box)
@@ -229,6 +274,14 @@ class MainWindow(QMainWindow):
         self.hole_pct = QDoubleSpinBox(); self.hole_pct.setRange(-90, 50)
         self.hole_pct.setValue(p.hole_scale_percent); self.hole_pct.setSuffix(" %")
         self.hole_pct.valueChanged.connect(lambda v: self._set_hole("hole_scale_percent", v))
+        self.hole_min_d = QDoubleSpinBox(); self.hole_min_d.setRange(0, 20)
+        self.hole_min_d.setSingleStep(0.1); self.hole_min_d.setDecimals(2)
+        self.hole_min_d.setValue(p.hole_min_diameter); self.hole_min_d.setSuffix(" mm")
+        self.hole_min_d.setToolTip("Les trous plus petits que ce diamètre ne sont PAS "
+                                   "percés au laser : vias et trous de connecteur sont "
+                                   "trop petits, tout brûle autour. 0 = tout percer. "
+                                   "Vaut aussi pour les trous de la finition.")
+        self.hole_min_d.valueChanged.connect(lambda v: self._set_hole("hole_min_diameter", v))
         self.hole_speed = QDoubleSpinBox(); self.hole_speed.setRange(1, 10000)
         self.hole_speed.setValue(p.hole_speed); self.hole_speed.setSuffix(" mm/min")
         self.hole_speed.valueChanged.connect(lambda v: self._set_hole("hole_speed", v))
@@ -239,6 +292,7 @@ class MainWindow(QMainWindow):
         self.hole_passes.setValue(p.hole_passes)
         self.hole_passes.valueChanged.connect(lambda v: self._set_hole("hole_passes", v))
         hf.addRow("Taille (± % du Ø)", self.hole_pct)
+        hf.addRow("Ø mini percé", self.hole_min_d)
         hf.addRow("Vitesse", self.hole_speed)
         hf.addRow("Puissance", self.hole_power)
         hf.addRow("Passes", self.hole_passes)
@@ -273,6 +327,40 @@ class MainWindow(QMainWindow):
         self._cut_box = cut_box
         self._panel_layout.addWidget(cut_box)
 
+        # --- Sérigraphie : encombrement des composants et leurs noms ---
+        silk_box = QGroupBox("Sérigraphie (repères composants)")
+        silk_box.setToolTip("Marquage : contours de boîtiers et références (R2, C1…). "
+                            "Traits très fins -> lent et peu puissant, un seul passage.")
+        sf = QFormLayout(silk_box)
+        self.silk_speed = QDoubleSpinBox(); self.silk_speed.setRange(1, 10000)
+        self.silk_speed.setValue(p.silk_speed); self.silk_speed.setSuffix(" mm/min")
+        self.silk_speed.setToolTip("Lettres de quelques dixièmes de mm : au-delà de "
+                                   "~1200 mm/min la machine n'atteint pas la consigne "
+                                   "et arrondit les angles.")
+        self.silk_speed.valueChanged.connect(
+            lambda v: setattr(self.session.project, "silk_speed", v))
+        self.silk_power = QDoubleSpinBox(); self.silk_power.setRange(0, 100)
+        self.silk_power.setValue(p.silk_power); self.silk_power.setSuffix(" %")
+        self.silk_power.valueChanged.connect(
+            lambda v: setattr(self.session.project, "silk_power", v))
+        self.silk_passes = QSpinBox(); self.silk_passes.setRange(1, 10)
+        self.silk_passes.setValue(p.silk_passes)
+        self.silk_passes.valueChanged.connect(
+            lambda v: setattr(self.session.project, "silk_passes", v))
+        self.silk_text_h = QDoubleSpinBox(); self.silk_text_h.setRange(0.3, 10)
+        self.silk_text_h.setSingleStep(0.1); self.silk_text_h.setValue(p.silk_text_height)
+        self.silk_text_h.setSuffix(" mm")
+        self.silk_text_h.setToolTip("Hauteur des références reconstruites (source "
+                                    "ODB++ seulement ; en Gerber on reprend la "
+                                    "sérigraphie du projet telle quelle).")
+        self.silk_text_h.valueChanged.connect(
+            lambda v: setattr(self.session.project, "silk_text_height", v))
+        sf.addRow("Vitesse", self.silk_speed)
+        sf.addRow("Puissance", self.silk_power)
+        sf.addRow("Passes", self.silk_passes)
+        sf.addRow("Hauteur des noms", self.silk_text_h)
+        self._panel_layout.addWidget(silk_box)
+
         # --- Finition (après perchlorure) : pads + trous + texte ---
         fin_box = QGroupBox("Finition (après perchlorure)")
         fin_box.setToolTip("Job séparé : retire la PEINTURE restante là où l'on soude "
@@ -285,7 +373,10 @@ class MainWindow(QMainWindow):
         self.fin_pads = QCheckBox("Zones de soudure (pads)")
         self.fin_pads.setChecked(p.finish_pads)
         self.fin_pads.toggled.connect(lambda on: setattr(self.session.project, "finish_pads", on))
-        self.fin_holes = QCheckBox("Trous")
+        self.fin_holes = QCheckBox("Percer les trous au laser (pas un retrait de peinture)")
+        self.fin_holes.setToolTip("Décoché par défaut : la finition retire la peinture, "
+                                  "elle ne perce pas. Coché : chaque trou est percé au "
+                                  "laser (passes ci-dessous), ce qui rallonge beaucoup le job.")
         self.fin_holes.setChecked(p.finish_holes)
         self.fin_holes.toggled.connect(lambda on: setattr(self.session.project, "finish_holes", on))
         self.fin_text = QLineEdit(p.finish_text)
@@ -309,12 +400,15 @@ class MainWindow(QMainWindow):
         self.fin_passes = QSpinBox(); self.fin_passes.setRange(1, 20)
         self.fin_passes.setValue(p.finish_passes)
         self.fin_passes.valueChanged.connect(lambda v: setattr(self.session.project, "finish_passes", v))
-        self.fin_inset = QDoubleSpinBox(); self.fin_inset.setRange(0, 0.5)
-        self.fin_inset.setSingleStep(0.01); self.fin_inset.setValue(p.finish_pads_inset)
-        self.fin_inset.setSuffix(" mm")
-        self.fin_inset.setToolTip("Rétrécit les pads avant de dénuder : la peinture "
-                                  "est retirée STRICTEMENT sur le cuivre.")
-        self.fin_inset.valueChanged.connect(lambda v: setattr(self.session.project, "finish_pads_inset", v))
+        self.fin_inset = QDoubleSpinBox(); self.fin_inset.setRange(0, 40)
+        self.fin_inset.setSingleStep(1.0); self.fin_inset.setValue(p.finish_pads_shrink)
+        self.fin_inset.setSuffix(" %")
+        self.fin_inset.setToolTip("Rétrécit chaque pad de ce pourcentage avant de le "
+                                  "dénuder : la peinture déborde sur son bord et sert "
+                                  "de vernis épargne, comme le masque vert d'un vrai "
+                                  "circuit. Proportionnel, donc juste sur un 0402 "
+                                  "comme sur un bornier.")
+        self.fin_inset.valueChanged.connect(lambda v: setattr(self.session.project, "finish_pads_shrink", v))
         self.fin_hole_passes = QSpinBox(); self.fin_hole_passes.setRange(1, 100)
         self.fin_hole_passes.setValue(p.finish_hole_passes)
         self.fin_hole_passes.setToolTip("Perçage laser : passes pleines sur chaque trou "
@@ -339,7 +433,7 @@ class MainWindow(QMainWindow):
         self.btn_finish = QPushButton("Exporter G-code finition…")
         self.btn_finish.clicked.connect(self.export_finish)
         ff.addRow(self.fin_pads)
-        ff.addRow("Retrait pads", self.fin_inset)
+        ff.addRow("Retrait pads (vernis)", self.fin_inset)
         ff.addRow(self.fin_holes)
         ff.addRow("Passes trous (perçage)", self.fin_hole_passes)
         ff.addRow("Texte", self.fin_text)
@@ -382,6 +476,10 @@ class MainWindow(QMainWindow):
         bf.addRow(self.mark_chk)
         self._panel_layout.addWidget(bed_box)
 
+        # --- dessin vectoriel : outils + calques de travail ---
+        self.draw_panel = DrawingPanel(self.editor, self._on_drawing_changed)
+        self._panel_layout.addWidget(self.draw_panel)
+
         self._layers_container = QVBoxLayout()
         self._panel_layout.addLayout(self._layers_container)
         self._panel_layout.addStretch(1)
@@ -400,11 +498,37 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self._layer_widgets: list[LayerWidget] = []
 
+    def new_drawing(self):
+        """Repart d'une feuille vierge : aucun PCB, juste le plateau.
+
+        Tout le reste du logiciel fonctionne — parcours, phases, envoi — parce
+        que l'emprise du travail se déduit du DESSIN quand il n'y a pas de
+        carte (``Session.content_bounds``).
+        """
+        if self.session.layers or self.session.project.shapes:
+            r = QMessageBox.question(
+                self, "Nouveau dessin",
+                "Abandonner le travail en cours et repartir d'une feuille "
+                "vierge ?" + chr(10) + chr(10)
+                + "Enregistrez d'abord si vous voulez le garder.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        self._on_session_loaded(Session())
+        self.statusBar().showMessage(
+            "Feuille vierge : dessinez, puis envoyez comme d'habitude.")
+
     def _build_menu(self):
         m = self.menuBar().addMenu("&Fichier")
+        a = m.addAction("Nouveau dessin (sans PCB)…", self.new_drawing)
+        a.setToolTip("Feuille vierge : graver ou découper autre chose qu'un "
+                     "circuit — boîtier, plaque, gabarit, pochoir.")
+        m.addSeparator()
         m.addAction("Ouvrir un fichier / archive…", self.open_file)
         m.addAction("Ouvrir un dossier PCB…", self.import_folder)
         m.addAction("Ouvrir un projet .lpcb…", self.open_project)
+        m.addMenu(self._recent_menu)       # meme objet, tenu a jour en un point
         m.addSeparator()
         m.addAction("Enregistrer le projet…", self.save_project)
         m.addAction("Exporter le G-code (face active)…", self.export_gcode)
@@ -412,6 +536,64 @@ class MainWindow(QMainWindow):
         m.addAction("Nomenclature (BOM)…", self.show_bom)
         m.addSeparator()
         m.addAction("Quitter", self.close)
+
+    # ---- projets recents ------------------------------------------------------ #
+    _RECENT_MAX = 5
+
+    @staticmethod
+    def _norm(path) -> str:
+        """Cle de comparaison : le meme fichier ecrit autrement ne doit pas doubler."""
+        import os
+        return os.path.normcase(os.path.abspath(str(path)))
+
+    def _recent_list(self) -> list:
+        raw = QSettings("laser_pcb", "laser_pcb").value("recent", [], type=list)
+        return [str(x) for x in raw if str(x).strip()]
+
+    def _add_recent(self, path) -> None:
+        """Place ce chemin en tete, sans doublon, et ne garde que les 5 derniers."""
+        path = str(path)
+        key = self._norm(path)
+        kept = [q for q in self._recent_list() if self._norm(q) != key]
+        kept.insert(0, path)
+        QSettings("laser_pcb", "laser_pcb").setValue("recent", kept[:self._RECENT_MAX])
+        self._rebuild_recent()
+
+    def _rebuild_recent(self) -> None:
+        from pathlib import Path as _P
+        self._recent_menu.clear()
+        paths = self._recent_list()
+        if not paths:
+            act = self._recent_menu.addAction("(aucun projet recent)")
+            act.setEnabled(False)
+            return
+        for path in paths:
+            act = self._recent_menu.addAction(_P(path).name)
+            act.setToolTip(path)                 # chemin complet au survol
+            act.triggered.connect(lambda _=False, q=path: self._open_recent(q))
+        self._recent_menu.addSeparator()
+        self._recent_menu.addAction("Vider la liste", self._clear_recent)
+
+    def _clear_recent(self) -> None:
+        QSettings("laser_pcb", "laser_pcb").setValue("recent", [])
+        self._rebuild_recent()
+
+    def _open_recent(self, path: str) -> None:
+        """Rouvre un recent ; un chemin disparu est retire de la liste."""
+        from pathlib import Path as _P
+        if not _P(path).exists():
+            QMessageBox.information(
+                self, "Ouvrir un recent",
+                "Introuvable :" + chr(10) + path + chr(10) + chr(10)
+                + "Il a du etre deplace ou supprime ; je le retire de la liste.")
+            kept = [q for q in self._recent_list() if self._norm(q) != self._norm(path)]
+            QSettings("laser_pcb", "laser_pcb").setValue("recent", kept)
+            self._rebuild_recent()
+            return
+        if path.lower().endswith(".lpcb"):
+            self._open_project_path(path)
+        else:
+            self._import(path)
 
     def _rebuild_layers(self):
         for w in self._layer_widgets:
@@ -424,6 +606,12 @@ class MainWindow(QMainWindow):
             self._layer_widgets.append(w)
 
     # ---- actions ------------------------------------------------------- #
+    def _set_visible(self, key: str, state: bool):
+        """Affiche/masque un calque. Les couches source se chargent a la
+        demande : on ne lit la serigraphie que si on l'affiche."""
+        self._visible[key] = state
+        self._render()
+
     def _on_kerf(self, v):
         self.session.project.kerf = v
         self._invalidate_toolpaths()       # le kerf change les parcours
@@ -443,8 +631,14 @@ class MainWindow(QMainWindow):
     def _active_roles(self):
         return [self.session.active_side]
 
+    def _set_side_from_panel(self, side: str):
+        """Face changee depuis l onglet d envoi : on repercute sur la barre d outils."""
+        self.side.setCurrentIndex(0 if side == "top" else 1)
+
     def _on_side(self, *_):
         self.session.active_side = self.side.currentData()
+        if getattr(self, "send_panel", None):
+            self.send_panel.sync_side(self.session.active_side)
         self._invalidate_toolpaths()       # autre face = autres parcours
 
     def _on_mirror(self, *_):
@@ -497,6 +691,7 @@ class MainWindow(QMainWindow):
             (self.kerf, p.kerf), (self.margin, p.copper_margin),
             (self.simplify, p.simplify_tolerance),
             (self.hole_pct, p.hole_scale_percent),
+            (self.hole_min_d, p.hole_min_diameter),
             (self.hole_speed, p.hole_speed), (self.hole_power, p.hole_power),
             (self.hole_passes, p.hole_passes), (self.bed_w, p.bed_width),
             (self.bed_h, p.bed_height), (self.org_x, p.origin[0]), (self.org_y, p.origin[1]),
@@ -505,7 +700,10 @@ class MainWindow(QMainWindow):
             (self.fin_text_h, p.finish_text_height), (self.fin_text_x, p.finish_text_x),
             (self.fin_text_y, p.finish_text_y), (self.fin_speed, p.finish_speed),
             (self.fin_power, p.finish_power), (self.fin_passes, p.finish_passes),
-            (self.fin_inset, p.finish_pads_inset),
+            (self.fin_inset, p.finish_pads_shrink),
+            (self.silk_speed, p.silk_speed), (self.silk_power, p.silk_power),
+            (self.silk_passes, p.silk_passes),
+            (self.silk_text_h, p.silk_text_height),
             (self.fin_hole_passes, p.finish_hole_passes),
         ]
         for widget, val in pairs:
@@ -530,24 +728,54 @@ class MainWindow(QMainWindow):
         def load():
             s = Session()
             s.import_source(path)
+            s.drc_summary()                    # calcule dans le thread
             return s
-        self.run_busy(load, self._on_session_loaded, "Ouverture du PCB…")
+        self.run_busy(load, lambda s: self._on_session_loaded(s, path),
+                      "Ouverture du PCB…")
 
-    def _on_session_loaded(self, session):
+    def _on_session_loaded(self, session, path=None):
         self.session = session
         self._burn_geom = None
         self._time_label.setText("  ⏱ —  ")
         self._refresh_settings()
         self._rebuild_layers()
+        self.editor.undo.clear()           # l'historique d'un AUTRE projet n'a pas de sens
+        self.draw_panel.reload()
         self._render()
+        if path:
+            self._add_recent(path)
+        drc = self.session.drc_summary()
+        shorts = {k: v for k, v in drc.items() if v > 0}
         self.statusBar().showMessage(
             f"{self.session.project.source_kind.upper()} — {len(self.session.layers)} calques, "
-            f"{len(self.session.holes)} trous.")
+            f"{len(self.session.holes)} trous — DRC : "
+            + (", ".join(f"{k} : {v} court(s)" for k, v in shorts.items())
+               if shorts else "aucun court-circuit") + ".")
+        if shorts:
+            QMessageBox.warning(
+                self, "DRC",
+                "Le DRC trouve du cuivre qui relie deux nets :{nl}{nl}{det}{nl}{nl}"
+                "Verifiez la carte avant de graver.".format(
+                    nl=chr(10),
+                    det=chr(10).join(f"  {k} : {v} court(s)" for k, v in shorts.items())))
+
+    def _on_drawing_changed(self, *_):
+        """Le dessin a bougé : réafficher TOUT DE SUITE, recalculer ensuite.
+
+        Le rendu immédiat est indispensable — sans lui, une forme déplacée
+        resterait affichée à son ancienne place le temps de la temporisation.
+        """
+        self.session.invalidate_items()
+        self._burn_geom = None
+        self._time_label.setText("⏱ …")
+        self._render()
+        self._debounce.start()
 
     def _invalidate_toolpaths(self, *_):
         """La géométrie des parcours a changé : recalcul nécessaire au prochain rendu.
         Temporisé (debounce) pour ne pas recalculer à chaque frappe."""
         self._burn_geom = None
+        self.session.invalidate_items()        # les parcours en cache sont obsolètes
         self._time_label.setText("⏱ …")       # obsolète tant qu'on n'a pas recalculé
         self._debounce.start()                 # (re)lance le compte à rebours
 
@@ -565,6 +793,10 @@ class MainWindow(QMainWindow):
 
         def finish(result=None, err=None):
             dlg.close()
+            # ``done``/``failed`` partent de la DERNIERE ligne de run() : le
+            # worker peut ne pas en etre sorti. Lacher sa reference ici tuerait
+            # le process sans laisser de trace (cf. laserpcb/gui/threads.py).
+            threads.retire(self._worker)
             self._worker = None
             if err:
                 QMessageBox.critical(self, "Erreur", err)
@@ -586,7 +818,8 @@ class MainWindow(QMainWindow):
         self.canvas.render_session(self.session, roles=self._active_roles(),
                                    mirror=self.session.is_mirrored(), burn=burn,
                                    burn_geom=self._burn_geom if burn else None,
-                                   burn_edges=self.burn_edges_chk.isChecked())
+                                   burn_edges=self.burn_edges_chk.isChecked(),
+                                   visible=self._visible)
 
     def _burn_ready(self, geom):
         self._burn_geom = geom
@@ -605,7 +838,8 @@ class MainWindow(QMainWindow):
         items, minutes = result
         self.canvas.render_session(self.session, toolpath_items=items,
                                    roles=self._active_roles(),
-                                   mirror=self.session.is_mirrored())
+                                   mirror=self.session.is_mirrored(),
+                                   visible=self._visible)
         from .. import gcode as gc
         self._time_label.setText(f"  ⏱ {gc.format_duration(minutes)}  ")
         n_tight = sum(1 for it in items if len(it) > 3 and it[3] == "tight")
@@ -640,19 +874,24 @@ class MainWindow(QMainWindow):
         Path(path).write_text(prog, encoding="utf-8")
         from .. import gcode as gc
         self._time_label.setText(f"  ⏱ {gc.format_duration(minutes)}  ")
+        b = self.session.job_bounds()
+        zone = (f"zone X {b[0]:.0f}→{b[2]:.0f} / Y {b[1]:.0f}→{b[3]:.0f} mm — "
+                if b else "")
         self.statusBar().showMessage(
-            f"G-code face {side} : {path} — {st['lines']} lignes, "
+            f"G-code face {side} : {zone}{st['lines']} lignes, "
             f"segments {st['segments_before']} → {st['segments_after']}, "
-            f"gravé {st['length_before_mm']/1000:.2f} m → "
-            f"{st['length_after_mm']/1000:.2f} m, plus petit segment "
-            f"{st['shortest_mm']:.4f} mm, ~{gc.format_duration(minutes)}")
-        if 0 < st["shortest_mm"] < 0.01:
+            f"gravé {st['length_after_mm']/1000:.2f} m, "
+            f"~{gc.format_duration(minutes)}")
+        if st.get("short_ratio", 0.0) > 0.01:
             QMessageBox.warning(
                 self, "G-code",
-                f"Le plus petit segment gravé fait {st['shortest_mm']:.4f} mm, "
-                f"sous 0,01 mm.{chr(10)}{chr(10)}La machine ne sait pas exécuter "
-                "des segments aussi fins : elle risque d'hésiter. Augmentez "
-                "« Simplification tracés » dans le groupe Général.")
+                f"{st['short_segments']} segments gravés font moins de 0,01 mm "
+                f"({st['short_ratio']*100:.1f} % du total).{chr(10)}{chr(10)}"
+                "La machine ne sait pas exécuter des segments aussi fins : elle "
+                "risque d'hésiter.{nl}{nl}Augmenter « Simplification tracés » n'y "
+                "changera rien : ces segments sont des EXTRÉMITÉS de tracés, que "
+                "la simplification doit conserver. Réduisez plutôt la « Marge "
+                "cuivre », qui multiplie le nombre de tracés.".format(nl=chr(10)))
 
     def show_bom(self):
         """Affiche la nomenclature des composants (source ODB++ uniquement)."""
@@ -753,4 +992,5 @@ class MainWindow(QMainWindow):
         self._refresh_settings()
         self._rebuild_layers()
         self._render()
+        self._add_recent(f)
         self.statusBar().showMessage(f"Projet ouvert : {Path(f).name}")
