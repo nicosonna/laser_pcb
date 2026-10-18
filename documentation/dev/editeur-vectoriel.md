@@ -141,6 +141,71 @@ facteur 2 demandé donnait 1,89).
   `piece_origin` et `center_on_bed` en dépendent désormais. Cadrage, phases,
   envoi et G-code fonctionnent sur une feuille vierge.
 
+## Plateaux multiples et rangement automatique
+
+Un dessin de découpe tient rarement sur une plaque : les huit panneaux d'une
+étagère font 400 × 330 mm chacun. D'où deux notions ajoutées après coup :
+
+- **Un plateau = un job.** `Shape.plate` porte le numéro, `Session.active_plate`
+  dit lequel est affiché et gravé. L'aperçu, les parcours et le G-code ne
+  voient jamais que celui-là : on grave, on change la plaque, on passe au
+  suivant.
+- **`laserpcb/arrange.py`** range les pièces par étagères (*first-fit
+  decreasing height*) et ouvre autant de plateaux qu'il en faut. Ce n'est pas
+  l'optimum — le placement optimal est NP-difficile — mais c'est rapide,
+  stable, et le résultat reste lisible : des rangées nettes plutôt que des
+  pièces semées en biais.
+
+**Une pièce n'est pas une forme.** Un panneau découpé, c'est son contour ET
+ses perçages — souvent autant de chemins SVG distincts. Les ranger séparément
+envoie les trous à l'autre bout de la plaque, où ils ne veulent plus rien dire.
+`arrange.group_shapes()` réunit donc les formes qui se **recouvrent réellement**
+(pas qui se touchent : deux panneaux posés bord à bord ne font pas une pièce),
+et un groupe se déplace et tourne en bloc.
+
+Tourner un groupe demande un report : chaque forme tourne autour de SON centre,
+il faut donc la replacer là où la rotation du groupe l'aurait emmenée. Sans ce
+report, les perçages restent en arrière pendant que le panneau pivote.
+
+La **rotation à 90°** n'est pas un luxe : un panneau de 400,2 mm ne passe pas
+dans 400 mm de large, mais passe dans 415 mm de haut. Sans elle, huit pièces
+sur huit seraient déclarées trop grandes.
+
+Ce qui ne tient pas, même tourné, est **signalé** et posé seul sur son plateau.
+L'empiler discrètement dans un coin serait pire qu'un message.
+
+Mesuré sur un StorageShelf réel : 408 formes regroupées en 9 pièces (8
+panneaux portant 399 perçages, plus une réglette), 8 plateaux, 0 perçage sorti
+de son panneau, 0 chevauchement entre pièces, 0 débordement — en 0,2 s.
+
+## Vue multi-plateaux
+
+Tous les plateaux sont affichés **côte à côte**, comme dans un trancheur 3D :
+on voit d'un coup d'œil tout le travail et sur quelle plaque chaque pièce ira.
+Le plateau actif est en bleu plein, les autres estompés.
+
+Chaque plateau porte trois icônes : **centrer**, **ranger**, **vider**.
+
+Trois pièges, tous rencontrés :
+
+- **Le repère.** Une forme du plateau 3 vit dans le repère de SON plateau, pas
+  à 800 mm de l'origine. `canvas.to_model(pt, plate)` et
+  `from_model(x, y, plate)` portent le décalage ; `plate_at(pt)` dit quel
+  plateau est sous le curseur. Un geste de tracé retient le plateau de son
+  PREMIER point, sinon un glisser mordant sur le voisin couperait la forme.
+- **L'espacement des icônes.** Leur taille est fixe à l'écran
+  (`ItemIgnoresTransformations`) : leur espacement doit l'être aussi. Placées à
+  un écart en millimètres, elles se chevauchaient dès qu'on dézoomait.
+  `_layout_plate_buttons()` les repositionne à chaque changement d'échelle.
+- **Deux cadrages distincts.** « Ajuster » cadre le plateau de TRAVAIL,
+  « Plateau » les montre TOUS. Confondre les deux rend l'un des deux gestes
+  impossible.
+
+Seul le plateau actif est manipulable — les autres restent visibles mais
+figés : une poignée saisie sur un plateau voisin travaillerait dans le mauvais
+repère. En revanche, **lâcher une pièce sur le plateau d'à côté l'y transfère**
+(`DrawingEditor.move_shape`), coordonnées locales conservées.
+
 ## Reste à faire
 
 - **Import DXF** (l'autre format de CAO). Le type d'objet `trace` est déjà en

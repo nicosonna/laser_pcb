@@ -71,6 +71,7 @@ class Session:
     # Deux calculs concurrents se marchaient dessus (caches mutes en parallele,
     # geometries partagees) -> plantage natif, sans trace Python.
     _compute_lock: object = field(default_factory=threading.RLock, repr=False)
+    active_plate: int = 0      # plateau affiche et grave
     _origin_shift: tuple = (0.0, 0.0)  # translation appliquée à l'import (KiCad -> (0,0))
 
     # ------------------------------------------------------------------ #
@@ -412,8 +413,8 @@ class Session:
                 tuple(sorted(p.calibration.items())),
                 # Le DESSIN fait partie des parcours : sans sa signature ici, une
                 # forme modifiee resterait invisible, servie par le cache.
-                p.drawing_enabled,
-                tuple((s.kind, s.layer, round(s.rotation, 6),
+                p.drawing_enabled, self.active_plate,
+                tuple((s.kind, s.layer, s.plate, round(s.rotation, 6),
                        repr(sorted(s.params.items()))) for s in p.shapes),
                 tuple((c.id, c.enabled, c.mode, c.passes, c.speed, c.power)
                       for c in p.work_layers),
@@ -791,6 +792,15 @@ class Session:
         return gc.build(placed, config, title=title, prelude_items=prelude,
                         stats=stats)
 
+    def work_mode(self) -> str:
+        """Nature du travail : ``"pcb"`` si une carte est chargee, sinon ``"dessin"``.
+
+        Sert a replier l'interface : tous les reglages de gravure chimique
+        (marge cuivre, trous, decoupe FR4, serigraphie, finition apres
+        perchlorure) n'ont aucun sens sur une plaque ou un boitier.
+        """
+        return "pcb" if self.layers else "dessin"
+
     def content_bounds(self) -> tuple | None:
         """Emprise du TRAVAIL : la carte si elle existe, sinon le dessin.
 
@@ -916,6 +926,18 @@ class Session:
     def layer_by_id(self, layer_id: str):
         return next((c for c in self.work_layers() if c.id == layer_id), None)
 
+    def plate_count(self) -> int:
+        """Nombre de plateaux du dessin (toujours au moins un)."""
+        from .. import arrange as ar
+        return ar.plate_count(self.project.shapes)
+
+    def plate_shapes(self, plate: int | None = None) -> list:
+        """Formes d'UN plateau. Un plateau = un job : la gravure, l'aperçu et
+        le G-code ne voient jamais que celui qui est actif."""
+        from .. import arrange as ar
+        return ar.shapes_on(self.project.shapes,
+                            self.active_plate if plate is None else plate)
+
     def drawing_items_tagged(self) -> list:
         """Parcours des objets dessinés, catégorie « dessin ».
 
@@ -926,7 +948,7 @@ class Session:
         if not p.shapes:
             return []
         out = []
-        for shape in p.shapes:
+        for shape in self.plate_shapes():
             layer = self.layer_by_id(shape.layer)
             if layer is None or not layer.enabled:
                 continue
@@ -936,7 +958,7 @@ class Session:
     def drawing_geometry(self):
         """Union des objets dessinés — pour l'aperçu et l'emprise."""
         from shapely.ops import unary_union
-        geoms = [s.geometry() for s in self.project.shapes]
+        geoms = [s.geometry() for s in self.plate_shapes()]
         geoms = [g for g in geoms if g is not None and not g.is_empty]
         return unary_union(geoms) if geoms else None
 

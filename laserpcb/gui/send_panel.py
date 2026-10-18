@@ -308,7 +308,8 @@ class SendPanel(QWidget):
         for b in (self.btn_pause, self.btn_resume, self.btn_stop):
             ctl.addWidget(b)
         face = QHBoxLayout()
-        face.addWidget(QLabel("Face"))
+        self._side_label = QLabel("Face")
+        face.addWidget(self._side_label)
         self.side = QComboBox()
         self.side.addItem("Top (dessus)", "top")
         self.side.addItem("Bottom (dessous)", "bottom")
@@ -885,6 +886,22 @@ class SendPanel(QWidget):
         """Change la face active (synchronise avec la barre d outils)."""
         if self._set_side:
             self._set_side(self.side.currentData())
+
+    # Etapes propres au circuit imprime. « dessin » et tous les outils de
+    # POSITIONNEMENT laser restent la quoi qu'il arrive : ils servent autant
+    # pour une plaque que pour un circuit.
+    _PCB_PHASES = ("gravure", "trous", "decoupe", "serigraphie", "finition")
+
+    def set_pcb_mode(self, pcb: bool) -> None:
+        """Masque les etapes de circuit imprime quand il n'y a pas de PCB."""
+        for phase in self._PCB_PHASES:
+            b = self.btn_steps.get(phase)
+            if b is not None:
+                b.setVisible(pcb)
+        if hasattr(self, "side"):
+            self.side.setVisible(pcb)
+        if getattr(self, "_side_label", None) is not None:
+            self._side_label.setVisible(pcb)
 
     def sync_side(self, side: str) -> None:
         """Reflete la face choisie ailleurs, sans boucler sur le signal."""

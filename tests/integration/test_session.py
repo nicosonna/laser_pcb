@@ -499,3 +499,55 @@ def test_travailler_sans_aucun_pcb():
     assert items and all(it[3] == "dessin" for it in items)
     g = s.generate_gcode()
     assert "G1" in g and "M2" in g
+
+
+def test_un_plateau_un_job():
+    """Seul le plateau ACTIF est grave : c'est ce qui permet d'enchainer les
+    plaques sans refaire le placement a chaque fois."""
+    from laserpcb import arrange as ar
+    from laserpcb.drawing import KIND_RECT, Shape
+    s = Session()
+    s.work_layers()
+    # Des pièces DISTINCTES : superposées, elles ne feraient qu'une seule pièce
+    # (le rangement garde solidaires un contour et ses perçages).
+    s.project.shapes = [
+        Shape(KIND_RECT, {"x": 0, "y": i * 250.0, "w": 380, "h": 190},
+              layer="c1", id=f"o{i}") for i in range(5)
+    ]
+    res = ar.arrange(s.project.shapes, s.project.bed_width, s.project.bed_height,
+                     gap=3, margin=3)
+    assert res["plates"] >= 3
+    assert s.plate_count() == res["plates"]
+
+    total = 0
+    for i in range(s.plate_count()):
+        s.active_plate = i
+        n = len(s.plate_shapes())
+        total += n
+        items = s.drawing_items_tagged()
+        assert len(items) == n            # un trait par rectangle
+        g = s.generate_gcode()
+        assert "G1" in g
+    assert total == 5
+
+    # le plateau fait partie de la signature du cache
+    s.active_plate = 0
+    a = len(s.active_items_tagged())
+    s.active_plate = 1
+    b = len(s.active_items_tagged())
+    assert a and b and (a != b or s.plate_shapes() != [])
+
+
+def test_le_plateau_survit_a_lenregistrement(tmp_path):
+    from laserpcb.drawing import KIND_RECT, Shape
+    from laserpcb.project import Project
+    p = Project(name="plateaux")
+    p.shapes = [Shape(KIND_RECT, {"x": 0, "y": 0, "w": 10, "h": 10}, id="o1"),
+                Shape(KIND_RECT, {"x": 0, "y": 0, "w": 10, "h": 10}, id="o2")]
+    p.shapes[1].plate = 3
+    p.arrange_gap = 7.5
+    f = tmp_path / "p.lpcb"
+    p.save(f)
+    q = Project.load(f)
+    assert [x.plate for x in q.shapes] == [0, 3]
+    assert q.arrange_gap == 7.5

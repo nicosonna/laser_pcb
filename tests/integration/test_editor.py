@@ -361,3 +361,34 @@ def test_importer_un_svg_en_une_seule_annulation(qapp, tmp_path):
     assert cx == pytest.approx(50.0, abs=0.5)      # centré sur la carte
     ed.undo.undo(); _sync(ed)
     assert sess.project.shapes == []
+
+
+def test_tout_centrer_sur_chaque_plateau(qapp):
+    """Chaque plateau est centre sur LUI-MEME, en une seule annulation."""
+    sess, _c, ed = _setup(qapp)
+    bw = sess.project.bed_width
+    bh = sess.project.bed_height
+    sess.project.shapes = [
+        dr.Shape(dr.KIND_RECT, {"x": 0, "y": 0, "w": 40, "h": 20}, id="a"),
+        dr.Shape(dr.KIND_RECT, {"x": 300, "y": 300, "w": 60, "h": 30}, id="b"),
+    ]
+    sess.project.shapes[1].plate = 1
+    assert ed.center_all_plates() == 2
+    _sync(ed)
+
+    for s in sess.project.shapes:
+        minx, miny, maxx, maxy = s.geometry().bounds
+        assert (minx + maxx) / 2 == pytest.approx(bw / 2)
+        assert (miny + maxy) / 2 == pytest.approx(bh / 2)
+    assert [s.plate for s in sess.project.shapes] == [0, 1]   # pas de melange
+
+    ed.undo.undo()                       # UNE seule annulation pour les deux
+    _sync(ed)
+    assert sess.project.shapes[0].geometry().bounds == (0.0, 0.0, 40.0, 20.0)
+
+
+def test_tout_centrer_sans_rien_ne_fait_rien(qapp):
+    sess, _c, ed = _setup(qapp)
+    n = ed.undo.count()
+    assert ed.center_all_plates() == 0
+    assert ed.undo.count() == n

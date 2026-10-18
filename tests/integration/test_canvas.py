@@ -18,6 +18,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QPointF                    # noqa: E402
 from shapely.geometry import box                      # noqa: E402
 
 from laserpcb.gui.canvas import PcbCanvas             # noqa: E402
@@ -119,3 +120,83 @@ def test_le_cadrage_automatique_suit_le_redimensionnement(qapp):
     resize(900, 700)
     assert c.transform().m11() == pytest.approx(manuel), \
         "un zoom manuel ne doit plus être écrasé par le redimensionnement"
+
+
+def test_vue_multiplateaux_et_reperes(qapp):
+    """Les plateaux sont cote a cote : le repere doit suivre.
+
+    Une forme posee sur le plateau 3 vit dans le repere de CE plateau, pas a
+    800 mm de l'origine. C'est le piege central de la vue multiple.
+    """
+    from laserpcb import drawing as dr
+    from laserpcb.gui.editor import DrawingEditor
+
+    sess = _session()
+    sess.project.work_layers = dr.default_layers()
+    sess.project.shapes = [
+        dr.Shape(dr.KIND_RECT, {"x": 10, "y": 10, "w": 20, "h": 20}, id="o1"),
+        dr.Shape(dr.KIND_RECT, {"x": 10, "y": 10, "w": 20, "h": 20}, id="o2"),
+    ]
+    sess.project.shapes[1].plate = 2
+    sess.plate_count = lambda: 3
+    sess.plate_shapes = lambda p=None: [
+        s for s in sess.project.shapes
+        if s.plate == (sess.active_plate if p is None else p)]
+    sess.active_plate = 0
+
+    c = PcbCanvas()
+    c.resize(800, 400)
+    ed = DrawingEditor(c, lambda: sess)
+    c.render_session(sess, visible=VIS)
+
+    pitch = c._plate_pitch
+    assert pitch > sess.project.bed_width      # les plateaux ne se touchent pas
+
+    # aller-retour modele <-> scene, sur chaque plateau
+    for plate in (0, 1, 2):
+        sx, sy = c.from_model(10.0, 10.0, plate)
+        assert c.plate_at(QPointF(sx, sy)) == plate
+        assert c.to_model(QPointF(sx, sy)) == (pytest.approx(10.0),
+                                               pytest.approx(10.0))
+
+    # une forme du plateau 2 s'affiche bien decalee de deux pas
+    ed.set_plate(2)
+    qapp.processEvents()
+    c.render_session(sess, visible=VIS)
+    from laserpcb.gui.editor import ShapeItem
+    items = {i.model.id: i for i in c.scene().items() if isinstance(i, ShapeItem)}
+    assert set(items) == {"o1", "o2"}          # tous les plateaux sont AFFICHES
+    assert items["o2"].sceneBoundingRect().left() > 2 * pitch
+    # mais seul le plateau actif se manipule
+    from PySide6.QtWidgets import QGraphicsItem
+    flag = QGraphicsItem.GraphicsItemFlag.ItemIsMovable
+    assert items["o2"].flags() & flag
+    assert not (items["o1"].flags() & flag)
+
+
+def test_deplacer_une_piece_vers_le_plateau_voisin(qapp):
+    """Lacher une piece sur le plateau d'a cote l'y transfere."""
+    from laserpcb import drawing as dr
+    from laserpcb.gui.editor import DrawingEditor
+
+    sess = _session()
+    sess.project.work_layers = dr.default_layers()
+    sess.project.shapes = [dr.Shape(dr.KIND_RECT,
+                                    {"x": 10, "y": 10, "w": 20, "h": 20}, id="o1")]
+    sess.plate_count = lambda: 2
+    sess.plate_shapes = lambda p=None: [
+        s for s in sess.project.shapes
+        if s.plate == (sess.active_plate if p is None else p)]
+    sess.active_plate = 0
+
+    c = PcbCanvas()
+    c.resize(800, 400)
+    ed = DrawingEditor(c, lambda: sess)
+    c.render_session(sess, visible=VIS)
+
+    s = sess.project.shapes[0]
+    ed.move_shape(s, c._plate_pitch, 0.0)      # un plateau vers la droite
+    assert s.plate == 1
+    # coordonnees LOCALES inchangees : la piece est au meme endroit de sa plaque
+    assert s.geometry().bounds == (pytest.approx(10.0), pytest.approx(10.0),
+                                   pytest.approx(30.0), pytest.approx(30.0))

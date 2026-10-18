@@ -16,9 +16,9 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetrics, QImage, QPainter,
                            QPainterPath, QPen, QPolygonF)
-from PySide6.QtWidgets import (QFileDialog, QGraphicsItem, QGraphicsScene,
-                               QGraphicsSimpleTextItem, QGraphicsView, QLabel,
-                               QToolBar)
+from PySide6.QtWidgets import (QFileDialog, QGraphicsItem, QGraphicsRectItem,
+                               QGraphicsScene, QGraphicsSimpleTextItem,
+                               QGraphicsView, QLabel, QToolBar)
 from shapely.affinity import scale as _scale, translate as _translate
 
 _ROLE_COLOR = {"top": "#b5651d", "bottom": "#1d6fb5"}
@@ -112,6 +112,51 @@ def _pen(color: str, width: float, cosmetic: bool = True,
     return p
 
 
+class _PlateButton(QGraphicsRectItem):
+    """Petite icone cliquable posee au bord d'un plateau.
+
+    Taille ECRAN fixe (``ItemIgnoresTransformations``) : elle reste
+    saisissable que l'on voie un plateau ou huit.
+    """
+
+    def __init__(self, glyph: str, tip: str, on_click, color: str = "#4a5568"):
+        super().__init__(QRectF(-11, -11, 22, 22))
+        self._cb = on_click
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+        self.setBrush(QBrush(QColor("#ffffff")))
+        pen = QPen(QColor("#b8c0cc"))
+        pen.setCosmetic(True)
+        self.setPen(pen)
+        self.setZValue(25)
+        self.setToolTip(tip)
+        self.anchor = (0.0, 0.0, 0)       # (x_mm, y_mm, rang) — cf. _layout_plate_buttons
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptHoverEvents(True)
+        txt = QGraphicsSimpleTextItem(glyph, self)
+        f = QFont()
+        f.setPointSize(10)
+        txt.setFont(f)
+        txt.setBrush(QBrush(QColor(color)))
+        r = txt.boundingRect()
+        txt.setPos(-r.width() / 2.0, -r.height() / 2.0)
+
+    def hoverEnterEvent(self, event):
+        self.setBrush(QBrush(QColor("#eef3ff")))
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.setBrush(QBrush(QColor("#ffffff")))
+        super().hoverLeaveEvent(event)
+
+    def mousePressEvent(self, event):
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self.contains(event.pos()):
+            self._cb()
+        event.accept()
+
+
 class PcbCanvas(QGraphicsView):
     """Aperçu du PCB et des parcours. Même API que la version matplotlib."""
 
@@ -138,28 +183,45 @@ class PcbCanvas(QGraphicsView):
         # --- edition (branchee par DrawingEditor) ---
         self.editor = None
         self._mirror, self._cx, self._ox, self._oy = False, 0.0, 0.0, 0.0
+        # Vue multi-plateaux : chaque plateau est decale de _plate_pitch en X.
+        self._plate_pitch = 0.0
+        self._nplates = 1
+        self._plate_buttons = []
         self._rebuilding = False
         self._pan_from = None
         self._scene.selectionChanged.connect(self._on_selection)
 
     # ---- repere : ecran <-> modele ------------------------------------------ #
-    def to_model(self, pt) -> tuple:
+    def plate_at(self, pt) -> int:
+        """Plateau sous ce point de la scene.
+
+        Les plateaux sont poses cote a cote : la colonne dit lequel on vise.
+        """
+        if self._plate_pitch <= 0:
+            return 0
+        i = int((pt.x() - self._ox) // self._plate_pitch)
+        return max(0, min(i, self._nplates - 1))
+
+    def to_model(self, pt, plate: int | None = None) -> tuple:
         """Point de la SCENE vers les coordonnees du MODELE.
 
-        La scene porte le miroir (face arriere) et l'offset plateau ; les objets
-        dessines, eux, vivent dans le repere de la carte. Sans cette inversion,
-        dessiner sur la face arriere poserait les formes en miroir.
+        La scene porte le miroir (face arriere), l'offset plateau et, en vue
+        multi-plateaux, le decalage du plateau vise. Les objets dessines, eux,
+        vivent dans le repere de LEUR plateau : sans ces inversions, une forme
+        posee sur le plateau 3 arriverait a 800 mm de son origine.
         """
-        x, y = pt.x() - self._ox, pt.y() - self._oy
+        i = self.plate_at(pt) if plate is None else plate
+        x = pt.x() - self._ox - i * self._plate_pitch
+        y = pt.y() - self._oy
         if self._mirror:
             x = 2 * self._cx - x
         return (x, y)
 
-    def from_model(self, x: float, y: float) -> tuple:
+    def from_model(self, x: float, y: float, plate: int = 0) -> tuple:
         """Point du MODELE vers les coordonnees de la SCENE (inverse de to_model)."""
         if self._mirror:
             x = 2 * self._cx - x
-        return (x + self._ox, y + self._oy)
+        return (x + self._ox + plate * self._plate_pitch, y + self._oy)
 
     def mirrored(self) -> bool:
         return self._mirror
@@ -188,6 +250,7 @@ class PcbCanvas(QGraphicsView):
             return
         self._auto_fit = False
         self.scale(*((1.25, 1.25) if event.angleDelta().y() > 0 else (0.8, 0.8)))
+        self._layout_plate_buttons()
         self.viewport().update()           # la grille dépend de l'échelle
 
     def mousePressEvent(self, event):
@@ -199,8 +262,20 @@ class PcbCanvas(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
-        if self.editor is not None and self.editor.mouse_press(
-                self.mapToScene(event.position().toPoint()), event.button()):
+        pos = self.mapToScene(event.position().toPoint())
+        from .editor import TOOL_SELECT
+        if (self.editor is not None and self._nplates > 1
+                and self.editor.tool == TOOL_SELECT
+                and event.button() == Qt.MouseButton.LeftButton
+                and not self.itemAt(event.position().toPoint())):
+            # Clic dans le vide d'un autre plateau : on s'y installe, comme
+            # dans un trancheur 3D.
+            cible = self.plate_at(pos)
+            if cible != int(getattr(self.editor._get_session(), "active_plate", 0)):
+                self.editor.set_plate(cible)
+                event.accept()
+                return
+        if self.editor is not None and self.editor.mouse_press(pos, event.button()):
             event.accept()
             return
         super().mousePressEvent(event)
@@ -233,6 +308,13 @@ class PcbCanvas(QGraphicsView):
             return
         super().mouseReleaseEvent(event)
 
+    def contextMenuEvent(self, event):
+        if self.editor is not None and self.editor.context_menu(
+                self.mapToScene(event.pos()), event.globalPos()):
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
     def mouseDoubleClickEvent(self, event):
         from .editor import TOOL_POLYLINE
         if self.editor is not None and self.editor.tool == TOOL_POLYLINE:
@@ -255,6 +337,7 @@ class PcbCanvas(QGraphicsView):
     def _apply_fit(self) -> None:
         if self._fit_rect is not None and not self._fit_rect.isEmpty():
             self.fitInView(self._fit_rect, Qt.AspectRatioMode.KeepAspectRatio)
+            self._layout_plate_buttons()
             self.viewport().update()
 
     def fit(self) -> None:
@@ -270,19 +353,25 @@ class PcbCanvas(QGraphicsView):
         """
         self._auto_fit = False
         if self._bed_rect is not None:
-            m = max(self._bed_rect.width(), self._bed_rect.height()) * 0.04
-            self.fitInView(self._bed_rect.adjusted(-m, -m, m, m),
+            r = QRectF(self._bed_rect)
+            if self._nplates > 1:      # cadrer TOUS les plateaux
+                r.setWidth(self._plate_pitch * (self._nplates - 1) + r.width())
+            m = max(r.width(), r.height()) * 0.04
+            self.fitInView(r.adjusted(-m, -m, m, m),
                            Qt.AspectRatioMode.KeepAspectRatio)
+            self._layout_plate_buttons()
             self.viewport().update()
 
     def zoom_in(self) -> None:
         self._auto_fit = False
         self.scale(1.25, 1.25)
+        self._layout_plate_buttons()
         self.viewport().update()
 
     def zoom_out(self) -> None:
         self._auto_fit = False
         self.scale(0.8, 0.8)
+        self._layout_plate_buttons()
         self.viewport().update()
 
     def px_per_mm(self) -> float:
@@ -508,19 +597,26 @@ class PcbCanvas(QGraphicsView):
         if not vis("dessin"):
             return
         proj = getattr(session, "project", None)
-        shapes = list(getattr(proj, "shapes", ()) or ())
-        if not shapes:
+        toutes = list(getattr(proj, "shapes", ()) or ())
+        if not toutes:
             return
+        actif = int(getattr(session, "active_plate", 0))
         layers = {c.id: c for c in getattr(proj, "work_layers", ()) or ()}
         sel = self.editor.selected_ids if self.editor is not None else set()
         from shapely.geometry import LineString, MultiLineString, Polygon
-        for shape in shapes:
+        for shape in toutes:
+            plate = int(getattr(shape, "plate", 0))
+            if plate >= self._nplates:
+                continue
             lay = layers.get(shape.layer)
             if lay is not None and not lay.enabled:
                 continue
             color = lay.color if lay is not None else "#7a3fc4"
             try:
                 geom = xf(shape.geometry())
+                if plate:
+                    from shapely.affinity import translate as _tr
+                    geom = _tr(geom, plate * self._plate_pitch, 0.0)
             except Exception:  # noqa: BLE001
                 continue        # une forme invalide ne doit pas vider l'aperçu
             if geom is None or geom.is_empty:
@@ -557,10 +653,51 @@ class PcbCanvas(QGraphicsView):
                                alpha=0.25 if filled else 1.0)
                 continue
             from .editor import ShapeItem
-            item = ShapeItem(shape, self.editor, path, color, filled)
+            # Seul le plateau ACTIF se manipule : sans cela, une poignee saisie
+            # sur un plateau voisin travaillerait dans le mauvais repere.
+            item = ShapeItem(shape, self.editor, path, color, filled,
+                             interactive=(plate == actif))
             self._scene.addItem(item)
-            if shape.id in sel:
+            if plate == actif and shape.id in sel:
                 item.setSelected(True)
+
+    def _plate_tools(self, index: int, dx: float, proj) -> None:
+        """Icones d'un plateau, empilees le long de son bord gauche.
+
+        Les gestes qu'on refait sans cesse quand on prepare une decoupe :
+        centrer, ranger, vider.
+        """
+        ed = self.editor
+        if ed is None:
+            return
+        actions = [
+            ("⊕", "Centrer les pieces de ce plateau",
+             lambda i=index: ed.center_plate(i)),
+            ("≡", "Ranger les pieces de ce plateau",
+             lambda i=index: ed.arrange_plate(i)),
+            ("✕", "Vider ce plateau (supprime ses pieces)",
+             lambda i=index: ed.clear_plate(i)),
+        ]
+        # En haut a DROITE, a l'interieur du plateau : a l'exterieur elles
+        # chevauchaient le plateau voisin des qu'on en affiche plusieurs.
+        for k, (glyph, tip, cb) in enumerate(actions):
+            b = _PlateButton(glyph, tip, cb)
+            # Ancrage en millimetres, ecart en PIXELS : la taille des icones est
+            # fixe a l'ecran, donc leur espacement doit l'etre aussi. En
+            # millimetres, elles se chevauchaient des qu'on dezoomait.
+            b.anchor = (dx + proj.bed_width, proj.bed_height, k)
+            self._scene.addItem(b)
+            self._plate_buttons.append(b)
+        self._layout_plate_buttons()
+
+    def _layout_plate_buttons(self) -> None:
+        """Replace les icones de plateau : ecart constant a l'ECRAN."""
+        px = self.px_per_mm()
+        if px <= 0:
+            return
+        for b in self._plate_buttons:
+            x_mm, y_mm, k = b.anchor
+            b.setPos(x_mm - (16 + k * 26) / px, y_mm - 16 / px)
 
     def render_session(self, session, toolpath_items=None, roles=None,
                        mirror=False, burn=False, burn_geom=None, burn_edges=False,
@@ -592,14 +729,34 @@ class PcbCanvas(QGraphicsView):
                 x = 2 * cx - x
             return (x + ox, y + oy)
 
-        # plateau : la surface utile de la machine, reperee en permanence
+        # Plateaux : un par job, poses COTE A COTE comme dans un trancheur 3D.
+        # On voit d'un coup d'oeil tout le travail, et sur quelle plaque chaque
+        # piece ira — au lieu de naviguer a l'aveugle entre huit vues.
+        self._nplates = (session.plate_count()
+                         if hasattr(session, "plate_count") else 1)
+        actif = int(getattr(session, "active_plate", 0))
+        self._plate_pitch = proj.bed_width + max(30.0, proj.bed_width * 0.08)
         self._bed_rect = QRectF(0, 0, proj.bed_width, proj.bed_height)
-        bed = self._scene.addRect(self._bed_rect)
-        bed.setPen(_pen("#8a8a8a", 1.2, style=Qt.PenStyle.DashLine))
-        bed.setBrush(QBrush(QColor(0, 0, 0, 8)))   # teinte tres legere : une SURFACE
-        bed.setZValue(-1)
-        self._text(1, proj.bed_height - 1,
-                   f"plateau {proj.bed_width:g} × {proj.bed_height:g} mm", "#8a8a8a")
+        self._plate_buttons = []
+        for i in range(self._nplates):
+            dx = i * self._plate_pitch
+            vif = (i == actif)
+            bed = self._scene.addRect(
+                QRectF(dx, 0, proj.bed_width, proj.bed_height))
+            bed.setPen(_pen("#2b6cb0" if vif else "#9aa3ad", 2.2 if vif else 1.2,
+                            style=(Qt.PenStyle.SolidLine if vif
+                                   else Qt.PenStyle.DashLine)))
+            bed.setBrush(QBrush(QColor(43, 108, 176, 16) if vif
+                                else QColor(0, 0, 0, 8)))
+            bed.setZValue(-1)
+            etiquette = f"Plateau {i + 1}/{self._nplates}"
+            if self._nplates == 1:
+                etiquette = f"plateau {proj.bed_width:g} × {proj.bed_height:g} mm"
+            self._text(dx + 1, proj.bed_height - 1, etiquette,
+                       "#2b6cb0" if vif else "#8a8a8a", size=8 if vif else 7)
+            # Les icones n'ont de sens qu'avec quelque chose dessus.
+            if self._nplates > 1 or getattr(proj, "shapes", None):
+                self._plate_tools(i, dx, proj)
 
         if (vis("carte") and session.board is not None
                 and not session.board.is_empty):
@@ -687,7 +844,10 @@ class PcbCanvas(QGraphicsView):
             self._fit_rect = QRectF(minx - m, miny - m,
                                     (maxx - minx) + 2 * m, (maxy - miny) + 2 * m)
         else:
-            self._fit_rect = QRectF(0, 0, proj.bed_width, proj.bed_height)
+            # « Ajuster » cadre le plateau de TRAVAIL ; « Plateau » les montre
+            # tous (fit_bed). Deux gestes distincts, deux besoins distincts.
+            self._fit_rect = QRectF(actif * self._plate_pitch, 0,
+                                    proj.bed_width, proj.bed_height)
         self._scene.setSceneRect(
             self._scene.itemsBoundingRect().united(self._fit_rect)
             .adjusted(-20, -20, 20, 20))
@@ -714,8 +874,15 @@ def make_nav_toolbar(canvas: PcbCanvas, parent=None) -> QToolBar:
             canvas.save_image(f)
 
     tb.addAction("Image…", save)
+    return tb
+
+
+def add_nav_hint(tb: QToolBar) -> None:
+    """Rappel de navigation, ajoute EN FIN de barre.
+
+    Au milieu, il repoussait les boutons suivants dans le menu debordant.
+    """
     tb.addSeparator()
-    hint = QLabel("  molette : zoom · glisser : déplacer  ", tb)
+    hint = QLabel("  molette : zoom · milieu : déplacer  ", tb)
     hint.setStyleSheet("color:#777;")
     tb.addWidget(hint)
-    return tb

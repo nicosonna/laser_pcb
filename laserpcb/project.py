@@ -124,6 +124,9 @@ class Project:
     work_layers: list = field(default_factory=list)   # list[drawing.WorkLayer]
     shapes: list = field(default_factory=list)        # list[drawing.Shape]
     drawing_enabled: bool = True       # le dessin part-il dans le job complet ?
+    arrange_gap: float = 3.0           # ecart entre deux pieces rangees (mm)
+    arrange_margin: float = 3.0        # marge conservee au bord du plateau (mm)
+    arrange_rotate: bool = True        # autoriser la rotation a 90 deg
     schema: int = SCHEMA
 
     # ---- source embarquée --------------------------------------------------- #
@@ -199,6 +202,9 @@ class Project:
                          for x in d.get("work_layers", [])],
             shapes=[_dr.Shape.from_dict(x) for x in d.get("shapes", [])],
             drawing_enabled=d.get("drawing_enabled", True),
+            arrange_gap=d.get("arrange_gap", 3.0),
+            arrange_margin=d.get("arrange_margin", 3.0),
+            arrange_rotate=d.get("arrange_rotate", True),
             schema=d.get("schema", SCHEMA),
         )
 

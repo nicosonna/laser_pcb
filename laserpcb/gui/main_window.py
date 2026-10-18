@@ -7,15 +7,16 @@ from pathlib import Path
 from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
+    QMenu, QMessageBox,
     QProgressDialog, QPushButton, QScrollArea, QSpinBox, QToolBar, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 from ..project import (LayerConfig, MODE_COMBINED, MODE_ISOLATION, MODE_NEGATIVE)
 from . import threads
-from .canvas import PcbCanvas, make_nav_toolbar
-from .drawing_panel import DrawingPanel
+from .canvas import PcbCanvas, add_nav_hint, make_nav_toolbar
+from .drawing_panel import DrawingPanel, add_draw_actions
 from .editor import DrawingEditor
 from .session import Session
 
@@ -128,7 +129,9 @@ class MainWindow(QMainWindow):
         self._build_send_dock()
         self._rebuild_recent()
         self._build_menu()
-        self.statusBar().showMessage("Ouvrez un PCB (dossier, ZIP, TGZ) ou un projet .lpcb pour commencer.")
+        self._apply_mode()             # l'interface se replie des l'ouverture
+        self.statusBar().showMessage(
+            "Importez un PCB, un projet ou un SVG — ou dessinez directement.")
         # Reconnexion a la derniere graveuse utilisee, apres l affichage de la
         # fenetre (la liaison s ouvre dans un thread : aucun gel au demarrage).
         QTimer.singleShot(300, self.send_panel.try_auto_connect)
@@ -140,47 +143,60 @@ class MainWindow(QMainWindow):
 
         # Bouton « Ouvrir » unifié (fichier / archive / dossier / projet)
         open_btn = QToolButton()
-        open_btn.setText("📂 Ouvrir")
+        open_btn.setText("📂 Importer")
+        open_btn.setToolTip("Importe tout ce que le logiciel sait lire : archive "
+                            "PCB (Gerber, ODB++), projet .lpcb, dessin SVG. "
+                            "Le type est deduit du fichier.")
         open_btn.setPopupMode(QToolButton.MenuButtonPopup)
         menu = QMenu(open_btn)
-        menu.addAction("Fichier ou archive (ZIP / TGZ / TAR)…", self.open_file)
+        menu.addAction("N'importe quel fichier (archive, .lpcb, SVG)…", self.open_file)
+        menu.addSeparator()
         menu.addAction("Dossier PCB (ODB++ / Gerber)…", self.import_folder)
-        menu.addAction("Projet .lpcb…", self.open_project)
+        menu.addAction("Archive ou projet…", self.open_file)
+        menu.addAction("Dessin SVG…", self.import_svg_file)
         menu.addSeparator()
         self._recent_menu = QMenu("Ouvrir un récent", menu)
         menu.addMenu(self._recent_menu)
         open_btn.setMenu(menu)
-        open_btn.clicked.connect(self.open_file)   # clic direct = fichier/archive
+        open_btn.clicked.connect(self.open_file)   # clic direct = import universel
         tb.addWidget(open_btn)
 
         tb.addSeparator()
-        tb.addWidget(QLabel(" Face : "))
+        # Widgets qui n'ont de sens qu'avec un circuit : masques en mode dessin.
+        # Dans une barre d'outils, c'est l'ACTION qu'il faut masquer : cacher le
+        # widget seul ne suffit pas, la barre le reaffiche a la mise en page.
+        self._pcb_widgets = []
+        self._pcb_widgets.append(tb.addSeparator())
+        self._pcb_widgets.append(tb.addWidget(QLabel(" Face : ")))
         self.side = QComboBox()
         self.side.addItem("Top (dessus)", "top")
         self.side.addItem("Bottom (dessous)", "bottom")
         self.side.currentIndexChanged.connect(self._on_side)
-        tb.addWidget(self.side)
+        self._pcb_widgets.append(tb.addWidget(self.side))
         self.mirror = QCheckBox("Miroir (dessous)")
         self.mirror.setChecked(True)
         self.mirror.stateChanged.connect(self._on_mirror)
-        tb.addWidget(self.mirror)
-        tb.addSeparator()
+        self._pcb_widgets += [tb.addWidget(self.mirror), tb.addSeparator()]
         self.burn_chk = QCheckBox("Aperçu brûlure (noir)")
         self.burn_chk.stateChanged.connect(self._render)
-        tb.addWidget(self.burn_chk)
+        self._pcb_widgets.append(tb.addWidget(self.burn_chk))
         self.burn_edges_chk = QCheckBox("+ bords cuivre (rouge)")
         self.burn_edges_chk.setChecked(True)
         self.burn_edges_chk.setToolTip("Superpose les bords du cuivre d'origine sur "
                                        "l'aperçu brûlure : entre deux cuivres différents, "
                                        "le noir doit former une ligne continue.")
         self.burn_edges_chk.stateChanged.connect(self._render)
-        tb.addWidget(self.burn_edges_chk)
-        tb.addSeparator()
+        self._pcb_widgets += [tb.addWidget(self.burn_edges_chk), tb.addSeparator()]
         btn_bom = QPushButton("📋 BOM")
         btn_bom.setToolTip("Nomenclature des composants (ODB++) : tableau + export "
                            "CSV / HTML.")
         btn_bom.clicked.connect(self.show_bom)
-        tb.addWidget(btn_bom)
+        self._pcb_widgets += [tb.addWidget(btn_bom), tb.addSeparator()]
+        self._mode_label = QLabel("  ✏ Mode dessin  ")
+        self._mode_label.setStyleSheet(
+            "background:#eef2ff; border:1px solid #c3cbe8; border-radius:3px;"
+            " padding:1px 4px; color:#334;")
+        tb.addWidget(self._mode_label)
         tb.addSeparator()
         self._time_label = QLabel("  ⏱ —  ")
         self._time_label.setToolTip("Durée de gravure estimée de la face active "
@@ -239,6 +255,7 @@ class MainWindow(QMainWindow):
             vl.addLayout(row)
             self._visible[key] = on
             self._vis_boxes[key] = box
+        self._vis_box = vis_box
         self._panel_layout.addWidget(vis_box)
 
         kerf_box = QGroupBox("Général")
@@ -250,7 +267,8 @@ class MainWindow(QMainWindow):
         self.margin = QDoubleSpinBox(); self.margin.setRange(0, 0.3); self.margin.setSingleStep(0.01)
         self.margin.setValue(self.session.project.copper_margin); self.margin.setSuffix(" mm")
         self.margin.valueChanged.connect(self._on_margin)
-        kf.addRow("Marge cuivre (laser+chimie)", self.margin)
+        self._margin_label = QLabel("Marge cuivre (laser+chimie)")
+        kf.addRow(self._margin_label, self.margin)
         self.simplify = QDoubleSpinBox(); self.simplify.setRange(0.0, 0.1)
         self.simplify.setDecimals(4); self.simplify.setSingleStep(0.001)
         self.simplify.setValue(self.session.project.simplify_tolerance)
@@ -359,6 +377,7 @@ class MainWindow(QMainWindow):
         sf.addRow("Puissance", self.silk_power)
         sf.addRow("Passes", self.silk_passes)
         sf.addRow("Hauteur des noms", self.silk_text_h)
+        self._silk_box = silk_box
         self._panel_layout.addWidget(silk_box)
 
         # --- Finition (après perchlorure) : pads + trous + texte ---
@@ -470,8 +489,8 @@ class MainWindow(QMainWindow):
         self.mark_chk.toggled.connect(lambda on: self._set_proj("mark_zone_enabled", on))
         bf.addRow("Largeur plateau", self.bed_w)
         bf.addRow("Hauteur plateau", self.bed_h)
-        bf.addRow("Position X (PCB)", self.org_x)
-        bf.addRow("Position Y (PCB)", self.org_y)
+        bf.addRow("Position X du travail", self.org_x)
+        bf.addRow("Position Y du travail", self.org_y)
         bf.addRow(self.btn_center)
         bf.addRow(self.mark_chk)
         self._panel_layout.addWidget(bed_box)
@@ -479,6 +498,13 @@ class MainWindow(QMainWindow):
         # --- dessin vectoriel : outils + calques de travail ---
         self.draw_panel = DrawingPanel(self.editor, self._on_drawing_changed)
         self._panel_layout.addWidget(self.draw_panel)
+        # Les outils vont AUSSI dans la barre du haut : ce panneau est trop bas
+        # dans une colonne de reglages de plus de 2000 px.
+        add_draw_actions(self.nav, self.editor, self.draw_panel)
+        add_nav_hint(self.nav)
+        # Sans rendu initial, le canevas reste blanc : on ne voit meme pas le
+        # plateau, alors qu'on peut deja dessiner dessus.
+        self._render()
 
         self._layers_container = QVBoxLayout()
         self._panel_layout.addLayout(self._layers_container)
@@ -525,8 +551,9 @@ class MainWindow(QMainWindow):
         a.setToolTip("Feuille vierge : graver ou découper autre chose qu'un "
                      "circuit — boîtier, plaque, gabarit, pochoir.")
         m.addSeparator()
-        m.addAction("Ouvrir un fichier / archive…", self.open_file)
-        m.addAction("Ouvrir un dossier PCB…", self.import_folder)
+        m.addAction("Importer… (archive, projet, SVG)", self.open_file)
+        m.addAction("Importer un dossier PCB…", self.import_folder)
+        m.addAction("Importer un dessin SVG…", self.import_svg_file)
         m.addAction("Ouvrir un projet .lpcb…", self.open_project)
         m.addMenu(self._recent_menu)       # meme objet, tenu a jour en un point
         m.addSeparator()
@@ -590,10 +617,7 @@ class MainWindow(QMainWindow):
             QSettings("laser_pcb", "laser_pcb").setValue("recent", kept)
             self._rebuild_recent()
             return
-        if path.lower().endswith(".lpcb"):
-            self._open_project_path(path)
-        else:
-            self._import(path)
+        self.import_any(path)
 
     def _rebuild_layers(self):
         for w in self._layer_widgets:
@@ -666,17 +690,81 @@ class MainWindow(QMainWindow):
                 f"{b[2] - b[0]:.0f} × {b[3] - b[1]:.0f} mm — la découpe sortirait "
                 f"de la zone de travail.")
 
+    # Tout ce que le logiciel sait lire, et ce qu'il en fait.
+    _IMPORT_KINDS = (
+        (".lpcb", "projet laser_pcb"),
+        (".svg", "dessin vectoriel"),
+        (".zip", "archive PCB"), (".tgz", "archive PCB"), (".tar", "archive PCB"),
+        (".tar.gz", "archive PCB"), (".tbz2", "archive PCB"),
+    )
+
     def open_file(self):
-        """Ouvre un fichier : archive PCB (ZIP/TGZ/TAR) ou projet .lpcb (auto)."""
+        """Import UNIVERSEL : le type est deduit du fichier, pas du bouton.
+
+        Projet .lpcb, archive PCB (Gerber ou ODB++) ou dessin SVG : l'utilisateur
+        n'a pas a savoir quel menu ouvrir pour quel format.
+        """
         f, _ = QFileDialog.getOpenFileName(
-            self, "Ouvrir un fichier",
-            filter="PCB & projets (*.zip *.tgz *.tar *.tar.gz *.tbz2 *.lpcb);;Tous (*)")
-        if not f:
-            return
-        if f.lower().endswith(".lpcb"):
-            self._open_project_path(f)
+            self, "Importer",
+            filter=("Tout ce qui s'importe "
+                    "(*.zip *.tgz *.tar *.tar.gz *.tbz2 *.lpcb *.svg);;"
+                    "Projet laser_pcb (*.lpcb);;"
+                    "Archive PCB — Gerber ou ODB++ (*.zip *.tgz *.tar *.tar.gz *.tbz2);;"
+                    "Dessin vectoriel (*.svg);;Tous (*)"))
+        if f:
+            self.import_any(f)
+
+    def import_svg_file(self):
+        """Choisit un SVG et l'ajoute au travail en cours."""
+        f, _ = QFileDialog.getOpenFileName(self, "Importer un dessin SVG", "",
+                                           "Dessin vectoriel (*.svg)")
+        if f:
+            self._import_svg_file(f)
+
+    def import_any(self, path: str) -> None:
+        """Aiguille vers le bon import selon l'extension."""
+        low = str(path).lower()
+        if low.endswith(".lpcb"):
+            self._open_project_path(path)
+        elif low.endswith(".svg"):
+            self._import_svg_file(path)
         else:
-            self._import(f)
+            self._import(path)
+
+    def _import_svg_file(self, path: str) -> None:
+        """Pose un SVG dans le travail EN COURS (il ne le remplace pas).
+
+        C'est la difference avec un PCB ou un projet : un dessin s'ajoute,
+        il ne repart pas de zero.
+        """
+        from pathlib import Path as _P
+
+        from .. import svgimport as svg
+        try:
+            w_nat, h_nat = svg.natural_size(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Importer un SVG",
+                                 f"Lecture impossible :{chr(10)}{e}")
+            return
+        if w_nat <= 0:
+            QMessageBox.information(
+                self, "Importer un SVG",
+                "Ce fichier ne contient aucune forme exploitable." + chr(10) + chr(10)
+                + "Les textes doivent etre convertis en chemins dans le logiciel "
+                  "de dessin ; une image matricielle incluse n'est pas vectorielle.")
+            return
+        largeur, ok = QInputDialog.getDouble(
+            self, "Importer un SVG",
+            f"{_P(path).name}{chr(10)}Taille d'origine : "
+            f"{w_nat:.1f} x {h_nat:.1f} mm{chr(10)}{chr(10)}Largeur voulue (mm) :",
+            round(w_nat, 1), 0.5, 2000.0, 1)
+        if not ok:
+            return
+        n = self.editor.import_svg(path, largeur)
+        self._add_recent(path)
+        self.statusBar().showMessage(
+            f"{n} objet(s) importes depuis {_P(path).name}." if n
+            else "Rien d'exploitable dans ce fichier.")
 
     def import_folder(self):
         d = QFileDialog.getExistingDirectory(self, "Dossier PCB (Gerber ou ODB++)")
@@ -741,6 +829,7 @@ class MainWindow(QMainWindow):
         self._rebuild_layers()
         self.editor.undo.clear()           # l'historique d'un AUTRE projet n'a pas de sens
         self.draw_panel.reload()
+        self._apply_mode()
         self._render()
         if path:
             self._add_recent(path)
@@ -770,6 +859,41 @@ class MainWindow(QMainWindow):
         self._time_label.setText("⏱ …")
         self._render()
         self._debounce.start()
+
+    # Reglages qui n'ont de sens qu'avec un circuit imprime : gravure chimique,
+    # percage, decoupe du FR4, serigraphie, finition apres perchlorure.
+    _PCB_VIS_ROWS = ("carte", "cuivre", "serigraphie", "pads",
+                     "contour", "tight", "fill", "hole", "cut")
+
+    def _apply_mode(self) -> None:
+        """Replie l'interface selon la nature du travail.
+
+        Sans PCB, la moitie des reglages ne veut rien dire — et les laisser
+        n'est pas neutre : on finit par chercher pourquoi « Trous » ne fait
+        rien. Les outils d'ALIGNEMENT LASER, eux, restent toujours la : ils
+        servent autant pour une plaque que pour un circuit.
+        """
+        pcb = self.session.work_mode() == "pcb"
+        for box in (self._holes_box, self._cut_box, self._silk_box, self._fin_box,
+                    self._vis_box):
+            box.setVisible(pcb)
+        for w in self._pcb_widgets:
+            w.setVisible(pcb)
+        self.margin.setVisible(pcb)
+        self._margin_label.setVisible(pcb)
+        for i in range(self._layers_container.count()):
+            it = self._layers_container.itemAt(i).widget()
+            if it is not None:
+                it.setVisible(pcb)
+        self._mode_label.setText("  ⬚ Mode PCB  " if pcb else "  ✏ Mode dessin  ")
+        self._mode_label.setToolTip(
+            "Un circuit est charge : gravure chimique, percage, decoupe et "
+            "finition sont disponibles."
+            if pcb else
+            "Aucun circuit : seuls le dessin et les outils laser sont affiches. "
+            "Importez un PCB pour retrouver les reglages de gravure chimique.")
+        if hasattr(self, "send_panel"):
+            self.send_panel.set_pcb_mode(pcb)
 
     def _invalidate_toolpaths(self, *_):
         """La géométrie des parcours a changé : recalcul nécessaire au prochain rendu.

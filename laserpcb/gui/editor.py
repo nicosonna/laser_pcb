@@ -72,7 +72,8 @@ class ShapeItem(QGraphicsPathItem):
     """Un objet dessiné, sélectionnable et déplaçable."""
 
     def __init__(self, shape: dr.Shape, editor: "DrawingEditor",
-                 path: QPainterPath, color: str, filled: bool):
+                 path: QPainterPath, color: str, filled: bool,
+                 interactive: bool = True):
         super().__init__(path)
         # ATTENTION : surtout pas ``self.shape`` — ``shape()`` est une methode
         # VIRTUELLE de QGraphicsItem. L'ecraser par une dataclass fait renvoyer
@@ -80,8 +81,10 @@ class ShapeItem(QGraphicsPathItem):
         # immediate, sans exception Python.
         self.model = shape
         self._editor = editor
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, interactive)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, interactive)
+        if not interactive:
+            self.setOpacity(0.45)        # plateau voisin : visible, pas saisissable
         pen = QPen(QColor(color))
         pen.setWidthF(1.6)
         pen.setCosmetic(True)
@@ -109,10 +112,10 @@ class ShapeItem(QGraphicsPathItem):
             return
         # Qt a bougé l'ÉLÉMENT ; c'est le MODÈLE qui fait foi, on y reporte le
         # déplacement puis on remet l'élément à zéro (il sera reconstruit).
+        # En passant : lâcher une pièce sur un autre plateau l'y transfère.
         for item in self.scene().selectedItems():
             if isinstance(item, ShapeItem):
-                dx, dy = self._editor.delta_to_model(delta.x(), delta.y())
-                dr.translate_shape(item.model, dx, dy)
+                self._editor.move_shape(item.model, delta.x(), delta.y())
                 item.setPos(0, 0)
         self._editor._commit("Déplacer")
 
@@ -163,6 +166,7 @@ class DrawingEditor(QObject):
     changed = Signal()             # le modèle a bougé (réaffichage + recalcul)
     tool_changed = Signal(str)
     selection_changed = Signal(int)
+    plates_changed = Signal()      # nombre de plateaux ou plateau actif
 
     def __init__(self, canvas, get_session):
         super().__init__(canvas)
@@ -203,12 +207,109 @@ class DrawingEditor(QObject):
         self._layer_id = layer_id
 
     # ---- coordonnées --------------------------------------------------------- #
-    def to_model(self, pt: QPointF) -> tuple:
-        return self.canvas.to_model(pt)
+    def to_model(self, pt: QPointF, plate: int | None = None) -> tuple:
+        """Point ecran -> modele, dans le repere du plateau vise."""
+        return self.canvas.to_model(pt, plate)
 
     def delta_to_model(self, dx: float, dy: float) -> tuple:
         """Un déplacement écran vers le modèle : seul le miroir compte ici."""
         return (-dx if self.canvas.mirrored() else dx, dy)
+
+    def move_shape(self, shape, dx_scene: float, dy_scene: float) -> None:
+        """Deplace une forme d'un ecart ECRAN, plateau de destination compris.
+
+        Le calcul passe par la scene : miroir, offset plateau et decalage du
+        plateau visé sont ainsi pris en compte d'un coup, sans cas particulier.
+        """
+        b = shape.bounds()
+        if b is None:
+            return
+        depart = self.canvas.from_model(b[0], b[1], int(getattr(shape, "plate", 0)))
+        arrivee = QPointF(depart[0] + dx_scene, depart[1] + dy_scene)
+        cible = self.canvas.plate_at(arrivee)
+        mx, my = self.canvas.to_model(arrivee, plate=cible)
+        dr.translate_shape(shape, mx - b[0], my - b[1])
+        shape.plate = cible
+
+    # ---- plateaux : actions par plateau -------------------------------------- #
+    def _center_on_bed(self, shapes: list) -> bool:
+        """Centre un lot de formes sur le plateau. Renvoie False s'il est vide."""
+        bs = [s.bounds() for s in shapes if s.bounds() is not None]
+        if not bs:
+            return False
+        p = self.project
+        minx, miny = min(b[0] for b in bs), min(b[1] for b in bs)
+        maxx, maxy = max(b[2] for b in bs), max(b[3] for b in bs)
+        dx = (p.bed_width - (maxx - minx)) / 2.0 - minx
+        dy = (p.bed_height - (maxy - miny)) / 2.0 - miny
+        for s in shapes:
+            dr.translate_shape(s, dx, dy)
+        return True
+
+    def center_plate(self, index: int) -> None:
+        """Centre les pieces d'un plateau sur celui-ci."""
+        from .. import arrange as ar
+        shapes = ar.shapes_on(self.project.shapes, index)
+        if not shapes:
+            return
+        self._begin()
+        if self._center_on_bed(shapes):
+            self._commit(f"Centrer le plateau {index + 1}")
+        else:
+            self._abort()
+
+    def center_all_plates(self) -> int:
+        """Centre le contenu de CHAQUE plateau sur son propre plateau.
+
+        Une seule commande d'annulation pour l'ensemble : recentrer huit
+        plateaux ne doit pas demander huit Ctrl+Z.
+        """
+        from .. import arrange as ar
+        if not self.project.shapes:
+            return 0
+        self._begin()
+        faits = 0
+        for i in range(self.plate_count()):
+            if self._center_on_bed(ar.shapes_on(self.project.shapes, i)):
+                faits += 1
+        if faits:
+            self._commit("Tout centrer")
+        else:
+            self._abort()
+        return faits
+
+    def arrange_plate(self, index: int) -> dict:
+        """Range les pieces d'un SEUL plateau, sans toucher aux autres."""
+        from .. import arrange as ar
+        p = self.project
+        shapes = ar.shapes_on(p.shapes, index)
+        if not shapes:
+            return {"plates": 0, "placed": 0, "oversized": []}
+        self._begin()
+        res = ar.arrange(shapes, p.bed_width, p.bed_height, gap=p.arrange_gap,
+                         margin=p.arrange_margin, allow_rotate=p.arrange_rotate,
+                         first_plate=index)
+        self._commit(f"Ranger le plateau {index + 1}")
+        self.plates_changed.emit()
+        return res
+
+    def clear_plate(self, index: int) -> None:
+        """Vide un plateau : ses pieces sont SUPPRIMEES (annulable)."""
+        from .. import arrange as ar
+        if not ar.shapes_on(self.project.shapes, index):
+            return
+        self._begin()
+        self.project.shapes[:] = [s for s in self.project.shapes
+                                  if int(getattr(s, "plate", 0)) != index]
+        # Les plateaux suivants remontent : pas de trou dans la numerotation.
+        for s in self.project.shapes:
+            if int(getattr(s, "plate", 0)) > index:
+                s.plate -= 1
+        self._commit(f"Vider le plateau {index + 1}")
+        s = self._get_session()
+        s.active_plate = min(int(getattr(s, "active_plate", 0)),
+                             self.plate_count() - 1)
+        self.plates_changed.emit()
 
     def _snapped(self, pt: QPointF) -> QPointF:
         """Cale le point : d'abord sur un REPÈRE de la carte, sinon sur la grille.
@@ -248,6 +349,7 @@ class DrawingEditor(QObject):
         s = self._get_session()
         board = getattr(s, "board", None)
         key = (id(s), getattr(s, "active_side", ""), self.canvas.mirrored(),
+               self.active_plate(),
                tuple(getattr(s.project, "origin", (0, 0))),
                None if board is None else board.bounds)
         if getattr(self, "_targets_key", None) == key:
@@ -268,7 +370,8 @@ class DrawingEditor(QObject):
                     c = g.centroid
                     pts.append((c.x, c.y))
         self._targets_key = key
-        self._targets_cache = [self.canvas.from_model(x, y) for (x, y) in pts]
+        self._targets_cache = [self.canvas.from_model(x, y, self.active_plate())
+                               for (x, y) in pts]
         return self._targets_cache
 
     # ---- outils -------------------------------------------------------------- #
@@ -284,6 +387,9 @@ class DrawingEditor(QObject):
         if button != Qt.MouseButton.LeftButton or self.tool == TOOL_SELECT:
             return False
         pt = self._snapped(scene_pos)
+        # Le plateau est fixe par le PREMIER point : un glisser qui mord sur le
+        # plateau voisin ne doit pas couper la forme en deux.
+        self._start_plate = self.canvas.plate_at(scene_pos)
         if self.tool == TOOL_TEXT:
             self._place_text(pt)
             return True
@@ -314,8 +420,9 @@ class DrawingEditor(QObject):
         if abs(a.x() - b.x()) < 1e-6 or abs(a.y() - b.y()) < 1e-6:
             return True                       # clic sans glisser : rien à créer
         self._begin()
-        x0, y0 = self.to_model(QPointF(min(a.x(), b.x()), min(a.y(), b.y())))
-        x1, y1 = self.to_model(QPointF(max(a.x(), b.x()), max(a.y(), b.y())))
+        pl = getattr(self, "_start_plate", self.active_plate())
+        x0, y0 = self.to_model(QPointF(min(a.x(), b.x()), min(a.y(), b.y())), pl)
+        x1, y1 = self.to_model(QPointF(max(a.x(), b.x()), max(a.y(), b.y())), pl)
         x0, x1 = min(x0, x1), max(x0, x1)
         y0, y1 = min(y0, y1), max(y0, y1)
         if self.tool == TOOL_RECT:
@@ -336,7 +443,8 @@ class DrawingEditor(QObject):
         if len(pts) < 2:
             return
         self._begin()
-        model = [list(self.to_model(p)) for p in pts]
+        pl = getattr(self, "_start_plate", self.active_plate())
+        model = [list(self.to_model(p, pl)) for p in pts]
         self._add(dr.Shape(dr.KIND_POLYLINE, {"points": model, "closed": closed}),
                   "Polyligne")
 
@@ -349,7 +457,7 @@ class DrawingEditor(QObject):
         if not ok:
             return
         self._begin()
-        x, y = self.to_model(pt)
+        x, y = self.to_model(pt, getattr(self, "_start_plate", None))
         self._add(dr.Shape(dr.KIND_TEXT,
                            {"x": x, "y": y, "text": text, "height": h}), "Texte")
 
@@ -403,6 +511,9 @@ class DrawingEditor(QObject):
 
     def _add(self, shape: dr.Shape, text: str) -> None:
         shape.layer = self.current_layer().id
+        shape.plate = int(getattr(self, "_start_plate", None)
+                          if getattr(self, "_start_plate", None) is not None
+                          else self.active_plate())
         shape.id = dr.new_id("o", self.project.shapes)
         self.project.shapes.append(shape)
         self._commit(text)
@@ -444,6 +555,66 @@ class DrawingEditor(QObject):
             return ((minx + maxx) / 2.0, (miny + maxy) / 2.0)
         p = s.project
         return (p.bed_width / 2.0, p.bed_height / 2.0)
+
+    # ---- plateaux ---------------------------------------------------------- #
+    def plate_count(self) -> int:
+        from .. import arrange as ar
+        return ar.plate_count(self.project.shapes)
+
+    def active_plate(self) -> int:
+        return int(getattr(self._get_session(), "active_plate", 0))
+
+    def set_plate(self, index: int) -> None:
+        """Change de plateau : un plateau = un job a graver."""
+        n = self.plate_count()
+        index = max(0, min(index, n - 1))
+        s = self._get_session()
+        if index != getattr(s, "active_plate", 0):
+            s.active_plate = index
+            self._sel_ids = set()
+            self._refresh()
+            self.plates_changed.emit()
+
+    def add_plate(self) -> None:
+        """Ouvre un plateau VIDE et s'y place, pour y deposer des pieces."""
+        s = self._get_session()
+        s.active_plate = self.plate_count()
+        self._sel_ids = set()
+        self._refresh()
+        self.plates_changed.emit()
+
+    def move_selection_to_plate(self, index: int) -> None:
+        sel = self.selected_shapes()
+        if not sel:
+            return
+        self._begin()
+        for sh in sel:
+            sh.plate = max(0, index)
+        self._commit(f"Deplacer vers le plateau {index + 1}")
+        self.plates_changed.emit()
+
+    def arrange(self, only_selection: bool = False) -> dict:
+        """Range les pieces sur autant de plateaux qu'il en faut.
+
+        Sans cet outil, une decoupe qui depasse la plaque oblige a replacer
+        chaque piece a la main puis a relancer le travail autant de fois.
+        """
+        from .. import arrange as ar
+        p = self.project
+        shapes = self.selected_shapes() if only_selection else list(p.shapes)
+        if not shapes:
+            return {"plates": 0, "placed": 0, "oversized": []}
+        self._begin()
+        res = ar.arrange(shapes, p.bed_width, p.bed_height,
+                         gap=p.arrange_gap, margin=p.arrange_margin,
+                         allow_rotate=p.arrange_rotate)
+        self._commit("Arranger")
+        s = self._get_session()
+        s.active_plate = 0
+        self._sel_ids = set()
+        self._refresh()
+        self.plates_changed.emit()
+        return res
 
     def _restore(self, dicts: list) -> None:
         self.project.shapes[:] = [dr.Shape.from_dict(d) for d in dicts]
@@ -618,7 +789,7 @@ class DrawingEditor(QObject):
         """Coin du modèle ramené en coordonnées de scène."""
         x = box["minx"] if name[1] == "l" else box["maxx"]
         y = box["miny"] if name[0] == "b" else box["maxy"]
-        sx, sy = self.canvas.from_model(x, y)
+        sx, sy = self.canvas.from_model(x, y, self.active_plate())
         return QPointF(sx, sy)
 
     def update_handles(self) -> None:
@@ -679,6 +850,35 @@ class DrawingEditor(QObject):
             dr.scale_shape(s, sx, sy, ox, oy)
         self._box0 = self.selection_rect() or box
         self._refresh()
+
+    # ---- menu contextuel -------------------------------------------------------- #
+    def context_menu(self, scene_pos, global_pos) -> bool:
+        """Clic droit : agir sur la selection sans aller chercher le panneau.
+
+        C'est le chemin court pour changer un objet de calque, geste le plus
+        frequent du modele LightBurn.
+        """
+        from PySide6.QtGui import QColor, QPixmap
+        from PySide6.QtWidgets import QMenu
+
+        sel = self.selected_shapes()
+        if not sel:
+            return False
+        menu = QMenu(self.canvas)
+        sous = menu.addMenu(f"Mettre sur le calque  ({len(sel)} objet(s))")
+        for lay in self.layers():
+            pix = QPixmap(12, 12)
+            pix.fill(QColor(lay.color))
+            act = sous.addAction(pix, f"{lay.name}  ({lay.mode})")
+            act.triggered.connect(
+                lambda _=False, i=lay.id: self.assign_layer(i))
+        menu.addSeparator()
+        menu.addAction("Dupliquer", self.duplicate_selection)
+        menu.addAction("Centrer", self.center_selection_on_board)
+        menu.addSeparator()
+        menu.addAction("Supprimer", self.delete_selection)
+        menu.exec(global_pos)
+        return True
 
     # ---- clavier -------------------------------------------------------------- #
     def key(self, event) -> bool:

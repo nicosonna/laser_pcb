@@ -90,10 +90,12 @@ class Shape:
     layer: str = "c1"
     rotation: float = 0.0
     id: str = ""
+    plate: int = 0          # plateau d'appartenance (un plateau = un job)
 
     def to_dict(self) -> dict:
         return {"kind": self.kind, "params": dict(self.params),
-                "layer": self.layer, "rotation": self.rotation, "id": self.id}
+                "layer": self.layer, "rotation": self.rotation, "id": self.id,
+                "plate": self.plate}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Shape":
@@ -101,7 +103,8 @@ class Shape:
                    params=dict(d.get("params", {})),
                    layer=str(d.get("layer", "c1")),
                    rotation=float(d.get("rotation", 0.0)),
-                   id=str(d.get("id", "")))
+                   id=str(d.get("id", "")),
+                   plate=int(d.get("plate", 0)))
 
     # ---- géométrie dérivée --------------------------------------------------- #
     def geometry(self) -> BaseGeometry:

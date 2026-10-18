@@ -275,3 +275,56 @@ def test_busy_indicator_during_background_work(qapp):
     assert "génération" in p.status.text()
     p._set_busy(False)
     assert p.bar.maximum() == 100 and p.bar.value() == 0
+
+
+def test_mode_pcb_et_mode_dessin(qapp):
+    """L'interface se replie sans PCB, et se redeploie des qu'on en charge un.
+
+    Les outils d'ALIGNEMENT LASER restent la dans les deux cas : ils servent
+    autant pour une plaque que pour un circuit.
+    """
+    from laserpcb.gui.main_window import MainWindow
+    w = MainWindow()
+    w.resize(1400, 900)
+    w.show()
+    qapp.processEvents()
+
+    # --- sans PCB ---
+    assert w.session.work_mode() == "dessin"
+    assert "dessin" in w._mode_label.text().lower()
+    for box in (w._holes_box, w._cut_box, w._silk_box, w._fin_box, w._vis_box):
+        assert not box.isVisible()
+    assert not w.side.isVisible() and not w.mirror.isVisible()
+    visibles = {k for k, b in w.send_panel.btn_steps.items() if b.isVisible()}
+    assert visibles == {"dessin"}
+    # les outils laser ne bougent pas
+    assert w.send_panel.btn_frame.isVisible()
+    assert w.send_panel.btn_gotopiece.isVisible()
+    assert w.draw_panel.isVisible()
+
+    # --- avec un PCB ---
+    w._import("examples/module_relais")
+    _wait_worker(qapp, w)
+    qapp.processEvents()
+    assert w.session.work_mode() == "pcb"
+    assert "pcb" in w._mode_label.text().lower()
+    for box in (w._holes_box, w._cut_box, w._silk_box, w._fin_box, w._vis_box):
+        assert box.isVisible()
+    assert w.side.isVisible()
+    visibles = {k for k, b in w.send_panel.btn_steps.items() if b.isVisible()}
+    assert "gravure" in visibles and "finition" in visibles and "dessin" in visibles
+
+
+def test_import_universel_aiguille_selon_le_fichier(qapp, tmp_path):
+    """Un seul bouton : le type vient du FICHIER, pas du menu choisi."""
+    from laserpcb.gui.main_window import MainWindow
+    w = MainWindow()
+    vus = []
+    w._open_project_path = lambda p: vus.append(("projet", p))
+    w._import = lambda p: vus.append(("pcb", p))
+    w._import_svg_file = lambda p: vus.append(("svg", p))
+
+    w.import_any("C:/x/projet.lpcb")
+    w.import_any("C:/x/carte.zip")
+    w.import_any("C:/x/logo.SVG")          # casse indifferente
+    assert [k for k, _ in vus] == ["projet", "pcb", "svg"]
