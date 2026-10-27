@@ -75,6 +75,31 @@ Le flux est **coupé automatiquement pendant une gravure** : le G-code part en
 telnet sur le même WiFi, et la gigue d'un MJPEG peut affamer le tampon de la
 machine. Pour garder la vidéo pendant une gravure, passer le job par la carte SD.
 
+### Clic-pour-aller
+
+Une fois la caméra **calibrée**, un clic dans l'image devient une position en
+millimètres : *Aller au point* y amène la tête, *Définir 0,0 ici* y place
+l'origine du travail. C'est ce geste qui remplace le gabarit — on vise un coin
+de la pièce à l'écran au lieu de la caler mécaniquement.
+
+La calibration se fait en **quatre pointés**, pièce posée à la hauteur de
+gravure, et mesure tout d'un coup : échelle, rotation de la caméra et miroir
+éventuel du capteur.
+
+1. le pointeur laser s'allume à faible puissance — on clique le point lumineux,
+   ce qui donne **où le laser tire dans l'image** ;
+2. on clique un détail fixe de la pièce (coin, pastille, trait de crayon) ;
+3. la tête avance d'un pas connu en X — on reclique ce détail ;
+4. puis d'un pas en Y — on le reclique. La tête revient ensuite d'où elle vient.
+
+Les trois derniers pointés n'ont jamais besoin de savoir *où* est le détail :
+c'est son **déplacement** dans l'image qui donne l'échelle. Le réticule cesse
+d'être un réglage à tâtons, il découle de la mesure. Un clic ne déplace jamais
+la machine tout seul : il pose une cible, et c'est un bouton qui valide.
+
+À refaire si la lentille tourne ou si la caméra bouge sur la tête — et c'est
+pour ça que la mise au point se bloque au vernis.
+
 ## Aperçus rapides
 
 ```bash
@@ -110,6 +135,9 @@ Règle : toute fonction ajoutée/modifiée a un test, couverture vérifiée à c
       laser, flux coupé pendant la gravure — voir `firmware/lasercam/`
 - [x] Caméra : configuration par **portail captif** (mode point d'accès), réglage
       en NVS — reconfigurable sans reflashage
-- [ ] Caméra : clic-pour-aller (mapping pixel↔mm) puis alignement 2 points
-      (translation + rotation du job, en remplacement du gabarit)
+- [x] Caméra : **clic-pour-aller** — calibration pixel↔mm en quatre pointés
+      (échelle, rotation, miroir), clic pour viser, « Définir 0,0 ici »
+- [ ] Caméra : alignement 2 points — rotation du job, qui demande un
+      `project.rotation` appliqué au placement et au cadrage (aujourd'hui
+      seule la translation existe, via `project.origin`)
 - [ ] Vérifications de gravure réelle sur le Falcon 2 (calibration kerf/puissance)

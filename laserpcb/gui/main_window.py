@@ -246,7 +246,7 @@ class MainWindow(QMainWindow):
     def _build_camera_dock(self):
         """Camera de tete : viser la piece au lieu de l'aligner sur un gabarit."""
         from PySide6.QtWidgets import QDockWidget
-        from .camera_panel import CameraPanel
+        from .camera_panel import CameraPanel, SendPanelMachine
         dock = QDockWidget("Caméra", self)
         self.camera_panel = CameraPanel()
         dock.setWidget(self.camera_panel)
@@ -260,6 +260,9 @@ class MainWindow(QMainWindow):
         # pour la duree de la gravure, sinon sa gigue peut affamer le tampon de
         # la machine en pleine passe.
         self.send_panel.network_guard = self.camera_panel.set_locked
+        # Le clic-pour-aller doit deplacer la tete : le panneau camera ne
+        # connait la machine qu'a travers ce pont etroit.
+        self.camera_panel.set_machine(SendPanelMachine(self.send_panel))
 
     def _build_dock(self):
         from PySide6.QtWidgets import QDockWidget
