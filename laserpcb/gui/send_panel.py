@@ -188,6 +188,9 @@ class SendPanel(QWidget):
         self._get_piece_origin = get_piece_origin
         self.sender: GrblSender | None = None
         self.worker: StreamWorker | None = None
+        # Appele avec True pendant une gravure : la camera de tete y coupe son
+        # flux video, qui se disputerait le WiFi avec le G-code.
+        self.network_guard: Callable[[bool], None] | None = None
 
         root = QVBoxLayout(self)
 
@@ -400,6 +403,32 @@ class SendPanel(QWidget):
         self._set_connected(False)
 
     # ---- indicateur de travail ------------------------------------------------ #
+    def shutdown(self) -> None:
+        """Arrête proprement sondages et workers AVANT la fermeture.
+
+        À la fermeture, l'interpréteur détruit les objets : un QThread encore
+        en course déclenche alors ``qFatal()`` — après coup, une fois le code
+        de sortie déjà écrit. Le journal en portait la trace.
+        """
+        for t in (getattr(self, "_state_timer", None),
+                  getattr(self, "_retry", None),
+                  getattr(self, "_reaper", None)):
+            if t is not None:
+                t.stop()
+        for w in (getattr(self, "_frame_loop", None), getattr(self, "worker", None)):
+            if w is not None and hasattr(w, "request_stop"):
+                w.request_stop()
+        for nom in ("_state_worker", "_cmd", "_conn", "_gen", "_scan",
+                    "_frame_loop", "worker"):
+            w = getattr(self, nom, None)
+            if w is not None:
+                try:
+                    w.wait(3000)
+                except Exception:  # noqa: BLE001
+                    pass
+                setattr(self, nom, None)
+        threads.shutdown()
+
     # ---- fin de vie des threads ---------------------------------------------- #
     def _retire(self, th) -> None:
         """Ne lâche pas la référence d'un worker encore en course (cf. threads.py)."""
@@ -444,6 +473,13 @@ class SendPanel(QWidget):
         self.ports.setEnabled(not on); self.baud.setEnabled(not on)
 
     def _set_streaming(self, on: bool):
+        if self.network_guard is not None:
+            # Point de passage unique de TOUTES les gravures (job complet comme
+            # etape seule) : c'est ici qu'on libere le reseau pour le G-code.
+            try:
+                self.network_guard(on)
+            except Exception:  # noqa: BLE001
+                pass            # une camera absente ne bloque pas une gravure
         if on:
             self._state_timer.stop()
         elif self.sender:

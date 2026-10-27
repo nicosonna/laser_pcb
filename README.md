@@ -51,6 +51,30 @@ carte SD) ou **enregistrer le projet** `.lpcb` (source embarquée, rouvrable plu
 Le **mode négatif adaptatif** évide entièrement les grandes zones sans cuivre
 (rapide au centre, lent près des pistes) au lieu d'un simple détourage.
 
+## Caméra de tête
+
+Une **ESP32-CAM** montée sur la tête remplace le gabarit : on voit le plateau à
+travers la tête, et un réticule logiciel marque le point visé. Onglet *Caméra*
+dans la fenêtre. Firmware, câblage de la croix laser et flashage :
+[`firmware/lasercam/README.md`](firmware/lasercam/README.md).
+
+Elle se configure **sans reflashage** : au premier démarrage (ou si le réseau
+mémorisé ne répond pas) elle ouvre son propre réseau `lasercam-setup` avec un
+**portail captif** — on rejoint ce WiFi, la page de configuration s'ouvre
+seule, on choisit le réseau. Dans ce mode « sans réseau » la caméra reste
+entièrement utilisable sur `192.168.4.1` : on peut viser une pièce sans box ni
+routeur, la graveuse étant alors pilotée en USB.
+
+Vérification du montage sans ouvrir la GUI :
+
+```bash
+python scripts/camera_test.py            # détection mDNS, /status, image, flux
+```
+
+Le flux est **coupé automatiquement pendant une gravure** : le G-code part en
+telnet sur le même WiFi, et la gigue d'un MJPEG peut affamer le tampon de la
+machine. Pour garder la vidéo pendant une gravure, passer le job par la carte SD.
+
 ## Aperçus rapides
 
 ```bash
@@ -82,4 +106,10 @@ Règle : toute fonction ajoutée/modifiée a un test, couverture vérifiée à c
       origine absolue** (pointeur laser, définir 0,0), **aperçu brûlure**, import TGZ, zoom
 - [x] Défauts calés **Creality Falcon 2 22 W** (plateau 400×415, kerf 0,1 mm)
 - [x] Optimisation trajets à vide (ordre serpentin : −85 % sur gros jobs)
+- [x] **Caméra de tête** (ESP32-CAM) : flux réseau, réticule logiciel, croix
+      laser, flux coupé pendant la gravure — voir `firmware/lasercam/`
+- [x] Caméra : configuration par **portail captif** (mode point d'accès), réglage
+      en NVS — reconfigurable sans reflashage
+- [ ] Caméra : clic-pour-aller (mapping pixel↔mm) puis alignement 2 points
+      (translation + rotation du job, en remplacement du gabarit)
 - [ ] Vérifications de gravure réelle sur le Falcon 2 (calibration kerf/puissance)

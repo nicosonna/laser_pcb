@@ -13,3 +13,6 @@ dist/
 laser_pcb.log
 laser_pcb_crash.log
 gui_session.log
+
+# Identifiants WiFi de la camera de tete (voir secrets.h.example)
+firmware/lasercam/secrets.h

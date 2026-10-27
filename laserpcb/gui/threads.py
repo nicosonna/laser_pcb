@@ -42,6 +42,25 @@ def _sweep() -> None:
         _alive[:] = [t for t in _alive if not t.isFinished()]
 
 
+def shutdown(timeout_ms: int = 3000) -> None:
+    """Attend la fin de tous les threads en sursis, avant la fermeture.
+
+    Sans cette attente, l'interpréteur détruit à la sortie un ``QThread``
+    encore en course et Qt appelle ``qFatal()`` — un plantage qui survient
+    APRÈS le code de sortie, donc invisible sauf à lire le journal.
+    """
+    global _reaper
+    if _reaper is not None:
+        _reaper.stop()
+        _reaper = None
+    for t in list(_alive):
+        try:
+            t.wait(timeout_ms)
+        except Exception:  # noqa: BLE001
+            pass
+    _alive.clear()
+
+
 def pending() -> int:
     """Nombre de threads encore en sursis (diagnostic / tests)."""
     return len(_alive)

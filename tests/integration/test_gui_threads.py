@@ -60,7 +60,8 @@ def test_retire_ignore_un_thread_deja_termine(qapp):
     assert threads.pending() == 0
 
 
-@pytest.mark.parametrize("module", ["send_panel.py", "main_window.py"])
+@pytest.mark.parametrize("module", ["send_panel.py", "main_window.py",
+                                    "camera_panel.py"])
 def test_aucun_worker_nest_lache_sans_retire(module):
     """Chaque ``self._xxx = None`` sur un worker doit être précédé d'un retire."""
     lines = (ROOT / "laserpcb" / "gui" / module).read_text(
@@ -76,9 +77,11 @@ def test_aucun_worker_nest_lache_sans_retire(module):
         if "def __init__" in enclosing:
             continue
         avant = " ".join(lines[max(0, i - 4):i])
-        if "retire(" not in avant:
+        # ``retire()`` met le fil en sursis ; ``wait()`` l'attend carrément —
+        # plus fort encore, et c'est ce qu'on fait à la fermeture.
+        if "retire(" not in avant and ".wait(" not in avant:
             fautes.append(f"{module}:{i + 1} : {line.strip()}")
-    assert not fautes, ("référence de worker lâchée sans retire() — "
+    assert not fautes, ("référence de worker lâchée sans retire() ni wait() — "
                         "plantage silencieux garanti :\n" + "\n".join(fautes))
 
 
@@ -111,3 +114,30 @@ def test_loffset_du_gabarit_ne_touche_que_la_tete(qapp):
         p._goto_piece()
 
     assert vise == [(143.95, 168.45), (139.45, 172.8), (155.95, 161.45)], vise
+
+
+def test_larret_attend_les_fils(qapp):
+    """Fermer en laissant un fil en course fait appeler qFatal() à Qt.
+
+    Le plantage survient APRÈS le code de sortie : il n'apparaît que dans le
+    journal, d'où son invisibilité jusqu'à ce qu'on journalise Qt lui-même.
+    """
+    w = _Slow()
+    w.start()
+    threads._alive.clear()
+    threads.retire(w)
+    assert threads.pending() == 1
+    threads.shutdown()
+    assert threads.pending() == 0
+    assert w.isFinished(), "shutdown() doit ATTENDRE, pas seulement oublier"
+
+
+def test_la_fenetre_se_ferme_sans_fil_en_course(qapp):
+    """Parcours complet : la fenêtre arrête tout ce qu'elle a lancé."""
+    from laserpcb.gui.main_window import MainWindow
+    w = MainWindow()
+    w.show()
+    qapp.processEvents()
+    w.close()
+    qapp.processEvents()
+    assert threads.pending() == 0

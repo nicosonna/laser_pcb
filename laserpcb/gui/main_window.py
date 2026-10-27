@@ -127,6 +127,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_dock()
         self._build_send_dock()
+        self._build_camera_dock()
         self._rebuild_recent()
         self._build_menu()
         self._apply_mode()             # l'interface se replie des l'ouverture
@@ -135,6 +136,26 @@ class MainWindow(QMainWindow):
         # Reconnexion a la derniere graveuse utilisee, apres l affichage de la
         # fenetre (la liaison s ouvre dans un thread : aucun gel au demarrage).
         QTimer.singleShot(300, self.send_panel.try_auto_connect)
+
+    def closeEvent(self, event):
+        """Ferme les fils d'exécution AVANT de rendre la main.
+
+        Un QThread encore en course au moment où l'interpréteur détruit les
+        objets fait appeler ``qFatal()`` a Qt : le process meurt juste apres
+        avoir annonce une sortie propre.
+        """
+        try:
+            self._debounce.stop()
+            if getattr(self, "_worker", None) is not None:
+                self._worker.wait(3000)
+                self._worker = None
+            self.send_panel.shutdown()
+            if getattr(self, "camera_panel", None) is not None:
+                self.camera_panel.shutdown()
+            threads.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+        super().closeEvent(event)
 
     def _build_toolbar(self):
         tb = QToolBar("Barre principale", self)
@@ -217,9 +238,28 @@ class MainWindow(QMainWindow):
             get_piece_origin=lambda: self.session.piece_origin())
         dock.setWidget(self.send_panel)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self._send_dock = dock
         if getattr(self, "_layers_dock", None):
             self.tabifyDockWidget(self._layers_dock, dock)
             self._layers_dock.raise_()
+
+    def _build_camera_dock(self):
+        """Camera de tete : viser la piece au lieu de l'aligner sur un gabarit."""
+        from PySide6.QtWidgets import QDockWidget
+        from .camera_panel import CameraPanel
+        dock = QDockWidget("Caméra", self)
+        self.camera_panel = CameraPanel()
+        dock.setWidget(self.camera_panel)
+        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        anchor = getattr(self, "_send_dock", None) or getattr(self, "_layers_dock", None)
+        if anchor:
+            self.tabifyDockWidget(anchor, dock)
+        if getattr(self, "_layers_dock", None):
+            self._layers_dock.raise_()
+        # La video et le G-code se disputent le meme WiFi : le flux se coupe
+        # pour la duree de la gravure, sinon sa gigue peut affamer le tampon de
+        # la machine en pleine passe.
+        self.send_panel.network_guard = self.camera_panel.set_locked
 
     def _build_dock(self):
         from PySide6.QtWidgets import QDockWidget
