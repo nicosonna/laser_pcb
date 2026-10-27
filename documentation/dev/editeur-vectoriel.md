@@ -209,9 +209,62 @@ repère. En revanche, **lâcher une pièce sur le plateau d'à côté l'y transf
 ## Assistant de meubles (`laserpcb/boxgen.py`)
 
 Dans l'esprit de boxes.py : on décrit le meuble par ses cotes, le logiciel en
-déduit tous les panneaux et leurs assemblages à tenons. Quatre modèles — boîte
-ou plateau, bac à compartiments, casier d'étagère, armoire murale — dans une
-fenêtre à part, avec aperçu immédiat.
+déduit tous les panneaux et leurs assemblages à tenons. Cinq modèles — boîte
+ou plateau, bac à compartiments, casier d'étagère, armoire murale, tiroir —
+dans une fenêtre à part, avec aperçu immédiat.
+
+Pour un **tiroir**, les cotes saisies sont celles du COMPARTIMENT à équiper, et
+le jeu de coulissement est retiré ensuite : c'est le calcul où l'on se trompe
+d'un côté.
+
+**Les cloisons sont TENUES.** Chacune porte des tenons à ses deux bouts, qui
+traversent les parois par des mortaises. Le croisement à mi-bois entre cloisons
+ne suffit pas : en 1 × 4, une cloison ne croise rien et flotterait dans la
+caisse — défaut constaté à l'usage.
+
+Corollaire relevé au passage : une mortaise est une coupe INTÉRIEURE, que le
+trait élargit ; un tenon est une coupe EXTÉRIEURE, que le trait rétrécit. Ils
+doivent donc être dessinés en sens inverse — l'un plus large, l'autre plus
+étroit d'un demi-trait. Les mortaises ne le faisaient pas : 0,2 mm de jeu là où
+les encoches de bord donnaient un ajustement serré, deux comportements pour un
+même geste. Après coupe, tenon et mortaise font maintenant la même cote.
+
+**Poignées** : trou rond, trou oblong, encoche sur le dessus, ou deux trous de
+vis pour une poignée du commerce. Un trou se perce DANS la façade ; une encoche
+se retranche de son CONTOUR. Les confondre ferait découper une boucle fermée
+traversant le bord, qui libérerait un morceau de façade. Sur une porte, la
+poignée se place du côté OPPOSÉ au gond, sinon elle est inatteignable.
+
+**L'arête verticale est un VRAI peigne.** Premier jet : l'avant portait des
+tenons, le côté des encoches. Mais les deux panneaux ne se croisent pas dans la
+même région de l'espace — le tenon de l'avant sortait dans le vide et l'encoche
+du côté ne recevait rien. L'arête ne tenait donc rien du tout, défaut invisible
+à l'écran et constaté sur une pièce montée.
+
+Les deux panneaux portent maintenant des tenons qui **s'alternent** et se
+partagent la colonne d'angle. Pour qu'ils soient exactement complémentaires,
+l'arête est découpée en un nombre **impair** de segments égaux : l'avant prend
+les pairs, le côté les impairs. Impair, donc les deux extrémités reviennent au
+même panneau — ce qui remplit les deux coins.
+
+Conséquence sur les cotes : les côtés font toute la profondeur (et non
+`y - 2t`), leurs tenons comblant l'épaisseur du voisin.
+
+Vérifié par échantillonnage : sur 400 hauteurs et quatre formats de caisse, la
+colonne d'angle est occupée **exactement une fois** — jamais vide (coin percé),
+jamais deux fois (panneaux qui ne rentrent pas).
+
+**Les coins doivent être PLEINS.** Le motif commence et finit par un creux sur
+les bords horizontaux — les coins y restent ainsi en matière pleine. Mais sur
+les arêtes VERTICALES, ce même choix laissait un trou traversant de
+l'épaisseur du bois en haut et en bas de chaque angle : ni le panneau avant ni
+le côté n'occupaient la colonne d'angle. Défaut constaté sur une pièce réelle,
+invisible à l'écran.
+
+Les panneaux avant et arrière portent donc un tenon à chaque extrémité de
+leurs arêtes verticales (`_COINS_V`). Les côtés, eux, gardent le motif
+ordinaire : ils n'ont pas de matière dans cette colonne, et une encoche posée
+pile dans le coin dégénère avec le bord voisin — le contour devient invalide.
 
 **L'assemblage.** Deux panneaux perpendiculaires se joignent par un peigne :
 l'un porte des tenons qui dépassent de l'épaisseur du voisin, l'autre des
@@ -226,15 +279,87 @@ annoncées sont celles du meuble assemblé**.
 sort trop petit et flotte. `kerf` élargit les tenons et rétrécit les encoches
 d'un demi-trait chacun.
 
-**L'épaisseur commande la gravure.** `cut_profile()` est calé sur un point
-MESURÉ : 4 mm de contreplaqué passent en 5 passes à 80 %. Le reste est
-extrapolé — à vérifier sur une chute, le bois variant d'un lot à l'autre. Le
-calque « Découpe bois » est réglé tout seul, et le chiffre est affiché avant de
-lancer quoi que ce soit.
+**La découpe se règle par la DOSE, pas par les passes.** Ce qui traverse le
+bois, c'est l'énergie déposée par millimètre de course :
+`passes × puissance / vitesse`. `cut_profile()` part de la dose nécessaire et
+en déduit la VITESSE — le nombre de passes devient un choix libre.
+
+Conséquence utile : à énergie égale, **plus de passes permet d'aller plus vite
+à chaque passe**, ce qui brûle moins les bords qu'une seule passe lente. Le
+temps total, lui, ne change pas.
+
+La dose est calée sur une mesure RÉELLE : 4 mm de contreplaqué traversés en
+1 passe à 80 % et 300 mm/min. Premier jet du générateur : 5 passes à 300 — soit
+**cinq fois trop d'énergie**, découvert à l'usage (« le bois était coupé à 20 %
+du temps »). D'où le bouton **« Recalibrer sur une découpe réussie »**, qui
+redéfinit la dose à partir d'un essai de l'utilisateur et la mémorise : le bois
+varie trop d'un lot à l'autre pour qu'une constante tienne.
 
 **Le décor est de la GRAVURE.** Motifs géométriques et textes partent sur un
 calque à faible puissance, par défaut sur les seules façades (avant, porte).
 Les confondre avec la découpe ruinerait le panneau.
+
+## Vue 3D du meuble assemblé
+
+Pas de moteur 3D : une **projection isométrique** suffit à juger un meuble, et
+elle n'ajoute aucune dépendance. Chaque panneau porte sa POSE — `Piece.place =
+(origine, u, v)`, trois vecteurs de l'espace — et c'est au générateur de la
+renseigner : lui seul sait comment ça se monte.
+
+Les panneaux sont traités comme des plans sans épaisseur, peints du plus
+lointain au plus proche (algorithme du peintre) et éclairés selon leur
+orientation : c'est ce dégradé qui donne le relief. Les ouvertures sont
+soustraites du contour, donc on voit **à travers** les mortaises.
+
+Le point de vue **tourne à la souris** (azimut et élévation), molette pour le
+zoom, double-clic pour revenir à la vue de départ. L'élévation est bornée à
+±85° : au-delà on regarde le meuble par le dessus et la vue devient un plan.
+
+Un curseur « Éclaté » écarte les panneaux le long de leur normale, pour
+vérifier le montage.
+
+Deux pièges du tri par profondeur, tous deux rencontrés :
+
+- **la profondeur se prend au CENTRE RÉEL du panneau.** Avec une taille
+  forfaitaire, une tablette large passait devant une porte étroite — le centre
+  de la tablette étant plus proche de l'œil que celui de la porte ;
+- **une porte est toujours l'élément le plus avant**, ce que le tri par
+  centre ne peut pas voir. Elle est donc forcée au dernier rang
+  (`Piece.depth_group`) — mais seulement quand on regarde la façade : si l'on
+  tourne derrière le meuble, c'est le dos qu'on doit voir, et la porte repasse
+  au tout premier rang.
+
+Piège : une pièce sans pose disparaît de la vue **en silence**. Un test
+parcourt les quatre générateurs et refuse toute pièce qui n'en a pas.
+
+## Meuble de cuisine
+
+Le modèle le plus composite : un caisson ouvert en façade, dont la hauteur
+utile est partagée en sections — des tiroirs de bas en haut, puis une section
+à porte s'il y a lieu. Une tablette sépare deux sections et sert de glissière
+au tiroir du dessus.
+
+**Chaque tiroir est un meuble complet**, produit par `make_drawer` : il reçoit
+ses propres compartiments et sa poignée. Le générateur de cuisine ne fait que
+composer des briques déjà éprouvées, puis décaler leur POSE pour qu'elles
+apparaissent à leur place dans la vue 3D — les tracés de découpe, eux, restent
+à plat.
+
+**Le jeu de coulissement est TOTAL**, pas par côté : saisir 4 mm donne 4 mm de
+battement en largeur (2 de chaque côté). Compté par côté, un « 4 mm » intuitif
+en aurait fait 8 et le tiroir aurait dansé dans son logement.
+
+## Sélection et presse-papiers
+
+Une pièce est **sélectionnable depuis n'importe quel plateau** : cliquer dessus
+bascule sur son plateau et conserve la sélection. Aller d'abord choisir le
+plateau dans le sélecteur du haut était une corvée. Seul le plateau actif reste
+DÉPLAÇABLE — une poignée saisie ailleurs travaillerait dans le mauvais repère.
+
+**Copier / couper / coller** passent aussi par le presse-papiers système, en
+JSON : on peut ainsi déplacer des pièces d'un projet à l'autre. Le collage
+atterrit sur le plateau affiché, légèrement décalé — collé pile sur l'original,
+on ne saurait plus lequel on manipule.
 
 ## Percer avant de détourer
 

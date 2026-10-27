@@ -182,6 +182,17 @@ class MainWindow(QMainWindow):
         open_btn.clicked.connect(self.open_file)   # clic direct = import universel
         tb.addWidget(open_btn)
 
+        # Creer un meuble est une action de DEPART, au meme rang qu'importer :
+        # enterree dans le menu Fichier, personne ne la trouvait.
+        box_btn = QToolButton()
+        box_btn.setText("🪚 Créer un meuble")
+        box_btn.setToolTip("Assistant : boîte, bac à compartiments, casier "
+                           "d'étagère ou armoire murale. Les panneaux et leurs "
+                           "assemblages à tenons sont calculés depuis les cotes, "
+                           "et la découpe réglée depuis l'épaisseur du bois.")
+        box_btn.clicked.connect(self.open_box_wizard)
+        tb.addWidget(box_btn)
+
         tb.addSeparator()
         # Widgets qui n'ont de sens qu'avec un circuit : masques en mode dessin.
         # Dans une barre d'outils, c'est l'ACTION qu'il faut masquer : cacher le
@@ -584,12 +595,14 @@ class MainWindow(QMainWindow):
 
     def _insert_box(self):
         w = self._box_wizard
-        res = self.editor.insert_box(w.pieces, w.t.value())
+        res = self.editor.insert_box(w.pieces, w.t.value(), w.cut_profile())
         if not res["shapes"]:
             QMessageBox.information(self, "Assistant", "Rien à insérer.")
             return
+        prof = w.cut_profile()
         msg = (f"{res['pieces']} panneaux insérés sur {res['plates']} plateau(x) "
-               f"— découpe réglée pour {w.t.value():g} mm.")
+               f"— découpe {w.t.value():g} mm : {prof['passes']} passes à "
+               f"{prof['power']:.0f} %, {prof['speed']:.0f} mm/min.")
         if res.get("oversized"):
             msg += (chr(10) + chr(10) + f"{len(res['oversized'])} panneau(x) plus "
                     "grand(s) que le plateau : réduisez le meuble ou agrandissez "

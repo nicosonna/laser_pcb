@@ -392,3 +392,139 @@ def test_tout_centrer_sans_rien_ne_fait_rien(qapp):
     n = ed.undo.count()
     assert ed.center_all_plates() == 0
     assert ed.undo.count() == n
+
+
+def test_ajouter_un_plateau_en_cree_un_visible(qapp):
+    """Défaut signalé : « + Plateau » ne faisait rien.
+
+    Un plateau n'existait que par les pièces qu'il portait — donc un plateau
+    neuf, vide par définition, n'existait pas.
+    """
+    sess, canvas, ed = _setup(qapp)
+    sess.plate_count = lambda: max(
+        __import__("laserpcb.arrange", fromlist=["x"]).plate_count(
+            sess.project.shapes), int(sess.active_plate) + 1)
+    sess.plate_shapes = lambda p=None: [
+        s for s in sess.project.shapes
+        if s.plate == (sess.active_plate if p is None else p)]
+    sess.active_plate = 0
+    sess.project.shapes = [dr.Shape(dr.KIND_RECT, {"x": 5, "y": 5, "w": 30, "h": 20},
+                                    layer="c1", id="o1")]
+    assert ed.plate_count() == 1
+
+    ed.add_plate()
+    _sync(ed)
+    assert ed.active_plate() == 1
+    assert ed.plate_count() == 2, "le plateau neuf doit compter, même vide"
+    assert canvas._nplates == 2, "et être dessiné"
+    assert ed.selected_shapes() == []          # il est vide
+
+    # on revient sur le plateau 1, on sélectionne, et on envoie la pièce
+    ed.set_plate(0)
+    _sync(ed)
+    for i in canvas.scene().items():
+        if isinstance(i, ShapeItem):
+            i.setSelected(True)
+    assert ed.selected_shapes()
+    ed.move_selection_to_plate(1)
+    _sync(ed)
+    assert sess.project.shapes[0].plate == 1
+    assert ed.plate_count() == 2
+
+
+# ---- copier / coller -------------------------------------------------------- #
+def test_copier_coller_une_piece(qapp):
+    sess, canvas, ed = _setup(qapp)
+    ed.set_tool(TOOL_RECT)
+    _drag(ed, 10, 10, 40, 30)
+    _select_all(canvas)
+    assert ed.copy_selection() == 1
+
+    assert ed.paste(dx=50.0, dy=0.0) == 1
+    _sync(ed)
+    assert len(sess.project.shapes) == 2
+    a, b = sess.project.shapes
+    assert a.id != b.id, "la copie doit avoir son propre identifiant"
+    assert b.geometry().bounds[0] == pytest.approx(a.geometry().bounds[0] + 50)
+    assert ed.selected_ids == {b.id}       # la copie prend la sélection
+    ed.undo.undo(); _sync(ed)
+    assert len(sess.project.shapes) == 1
+
+
+def test_couper_enleve_et_garde_pour_coller(qapp):
+    sess, canvas, ed = _setup(qapp)
+    ed.set_tool(TOOL_RECT)
+    _drag(ed, 0, 0, 20, 20)
+    _select_all(canvas)
+    assert ed.cut_selection() == 1
+    _sync(ed)
+    assert sess.project.shapes == []
+    assert ed.paste() == 1
+    _sync(ed)
+    assert len(sess.project.shapes) == 1
+
+
+def test_coller_depose_sur_le_plateau_affiche(qapp):
+    """Coller doit atterrir là où on regarde, pas sur le plateau d'origine."""
+    sess, canvas, ed = _setup(qapp)
+    sess.plate_count = lambda: max(
+        __import__("laserpcb.arrange", fromlist=["x"]).plate_count(
+            sess.project.shapes), int(sess.active_plate) + 1)
+    sess.plate_shapes = lambda p=None: [
+        s for s in sess.project.shapes
+        if s.plate == (sess.active_plate if p is None else p)]
+    sess.active_plate = 0
+    ed.set_tool(TOOL_RECT)
+    _drag(ed, 10, 10, 40, 30)
+    _select_all(canvas)
+    ed.copy_selection()
+    ed.add_plate(); _sync(ed)
+    assert ed.active_plate() == 1
+    ed.paste(); _sync(ed)
+    assert [s.plate for s in sess.project.shapes] == [0, 1]
+
+
+def test_coller_sans_rien_ne_fait_rien(qapp):
+    sess, _c, ed = _setup(qapp)
+    ed._clip = []
+    try:
+        from PySide6.QtWidgets import QApplication
+        QApplication.clipboard().setText("")
+    except Exception:
+        pass
+    n = ed.undo.count()
+    assert ed.paste() == 0
+    assert ed.undo.count() == n
+
+
+# ---- sélection sur n'importe quel plateau ----------------------------------- #
+def test_cliquer_une_piece_dun_autre_plateau_y_bascule(qapp):
+    """Il fallait d'abord choisir le plateau en haut : corvée supprimée."""
+    sess, canvas, ed = _setup(qapp)
+    sess.plate_count = lambda: max(
+        __import__("laserpcb.arrange", fromlist=["x"]).plate_count(
+            sess.project.shapes), int(sess.active_plate) + 1)
+    sess.plate_shapes = lambda p=None: [
+        s for s in sess.project.shapes
+        if s.plate == (sess.active_plate if p is None else p)]
+    sess.active_plate = 0
+    sess.project.shapes = [
+        dr.Shape(dr.KIND_RECT, {"x": 5, "y": 5, "w": 20, "h": 20},
+                 layer="c1", id="o1"),
+        dr.Shape(dr.KIND_RECT, {"x": 5, "y": 5, "w": 20, "h": 20},
+                 layer="c1", id="o2"),
+    ]
+    sess.project.shapes[1].plate = 1
+    canvas.render_session(sess, visible=VIS)
+
+    items = {i.model.id: i for i in canvas.scene().items()
+             if isinstance(i, ShapeItem)}
+    assert set(items) == {"o1", "o2"}, "les deux plateaux sont affichés"
+    from PySide6.QtWidgets import QGraphicsItem
+    sel = QGraphicsItem.GraphicsItemFlag.ItemIsSelectable
+    assert items["o2"].flags() & sel, "une pièce d'un autre plateau est cliquable"
+
+    items["o2"].setSelected(True)
+    qapp.processEvents()
+    assert ed.active_plate() == 1, "le plateau de la pièce devient actif"
+    assert ed.selected_ids == {"o2"}, "et la sélection survit au basculement"

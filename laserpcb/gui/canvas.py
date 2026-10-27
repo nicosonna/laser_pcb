@@ -653,12 +653,15 @@ class PcbCanvas(QGraphicsView):
                                alpha=0.25 if filled else 1.0)
                 continue
             from .editor import ShapeItem
-            # Seul le plateau ACTIF se manipule : sans cela, une poignee saisie
-            # sur un plateau voisin travaillerait dans le mauvais repere.
+            # Tout est SELECTIONNABLE, d'ou qu'on clique : aller d'abord
+            # choisir le plateau en haut etait une corvee. Seul le plateau
+            # actif est DEPLACABLE — une poignee saisie ailleurs travaillerait
+            # dans le mauvais repere. Cliquer une piece d'un autre plateau y
+            # bascule (cf. DrawingEditor.note_selection).
             item = ShapeItem(shape, self.editor, path, color, filled,
-                             interactive=(plate == actif))
+                             interactive=True, movable=(plate == actif))
             self._scene.addItem(item)
-            if plate == actif and shape.id in sel:
+            if shape.id in sel:
                 item.setSelected(True)
 
     def _plate_tools(self, index: int, dx: float, proj) -> None:

@@ -88,6 +88,14 @@ class DrawingPanel(QWidget):
         tl.addLayout(align, 5, 0, 1, 2)
 
         row2 = QHBoxLayout()
+        b = QPushButton("Copier")
+        b.setToolTip("Ctrl+C")
+        b.clicked.connect(self.editor.copy_selection)
+        row2.addWidget(b)
+        b = QPushButton("Coller")
+        b.setToolTip("Ctrl+V — sur le plateau affiché")
+        b.clicked.connect(self.editor.paste)
+        row2.addWidget(b)
         b = QPushButton("Dupliquer")
         b.setToolTip("Ctrl+D")
         b.clicked.connect(self.editor.duplicate_selection)
@@ -114,10 +122,10 @@ class DrawingPanel(QWidget):
         b = QPushButton("+ Plateau")
         b.clicked.connect(self.editor.add_plate)
         plates.addWidget(b)
-        b = QPushButton("Y mettre la sélection")
-        b.setToolTip("Deplace les objets choisis vers le plateau affiche.")
-        b.clicked.connect(
-            lambda: self.editor.move_selection_to_plate(self.editor.active_plate()))
+        b = QPushButton("Déplacer vers…")
+        b.setToolTip("Envoie les objets choisis sur le plateau de votre choix. "
+                     "Un numéro au-delà du dernier crée le plateau.")
+        b.clicked.connect(self._move_selection)
         plates.addWidget(b)
         tl.addLayout(plates, 7, 0, 1, 2)
 
@@ -405,6 +413,28 @@ class DrawingPanel(QWidget):
         if hasattr(win, "statusBar"):
             win.statusBar().showMessage(f"{n} plateau(x) centré(s).")
 
+    def _move_selection(self):
+        """Envoie la sélection sur un plateau choisi.
+
+        On demande le numéro plutôt que de viser « le plateau affiché » :
+        changer de plateau efface la sélection, le geste en deux temps était
+        donc impossible.
+        """
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        n = len(self.editor.selected_shapes())
+        if not n:
+            QMessageBox.information(self, "Déplacer",
+                                    "Sélectionnez d'abord des objets.")
+            return
+        total = self.editor.plate_count()
+        cible, ok = QInputDialog.getInt(
+            self, "Déplacer vers…",
+            f"{n} objet(s) vers le plateau n° :" + chr(10)
+            + f"(1 à {total}, ou {total + 1} pour un nouveau)",
+            min(total + 1, self.editor.active_plate() + 2), 1, total + 1)
+        if ok:
+            self.editor.move_selection_to_plate(cible - 1)
+
     def refresh_plates(self):
         n, i = self.editor.plate_count(), self.editor.active_plate()
         self.lbl_plate.setText(f"Plateau {i + 1}/{n}")
@@ -531,6 +561,12 @@ def add_draw_actions(toolbar, editor, panel) -> None:
     a = toolbar.addAction("Importer un SVG…")
     a.setToolTip("Logo ou dessin fait ailleurs (Inkscape, Illustrator, un CAO…).")
     a.triggered.connect(panel._import_svg)
+    a = toolbar.addAction("Copier")
+    a.setToolTip("Ctrl+C — aussi utilisable d'un projet à l'autre")
+    a.triggered.connect(editor.copy_selection)
+    a = toolbar.addAction("Coller")
+    a.setToolTip("Ctrl+V — colle sur le plateau affiché")
+    a.triggered.connect(editor.paste)
     a = toolbar.addAction("Dupliquer")
     a.setToolTip("Ctrl+D")
     a.triggered.connect(editor.duplicate_selection)

@@ -1096,13 +1096,37 @@ class SendPanel(QWidget):
         QMessageBox.critical(self, "Gravure", f"Erreur GRBL :\n{msg}")
         self.status.setText("Erreur.")
 
+    def _machine_cmd(self, action, libelle: str) -> bool:
+        """Commande directe à la machine, à l'épreuve d'une liaison coupée.
+
+        Sans ce filet, appuyer sur « Reprendre » après une coupure remontait
+        une ``ConnectionResetError`` brute jusqu'à l'utilisateur — alors que la
+        reconnexion automatique sait traiter le cas.
+        """
+        if not self.sender:
+            return False
+        try:
+            action()
+        except Exception as e:  # noqa: BLE001
+            self._log(f"{libelle} : ERREUR {e}")
+            if self._looks_disconnected(str(e)):
+                self.status.setText("Liaison perdue — reconnexion…")
+                self._lost_connection(str(e))
+            else:
+                QMessageBox.critical(self, libelle, str(e))
+                self.status.setText(f"{libelle} : échec.")
+            return False
+        return True
+
     def _pause(self):
-        if self.sender:
-            self.sender.feed_hold(); self.status.setText("Pause")
+        if self._machine_cmd(self.sender.feed_hold if self.sender else None,
+                             "Pause"):
+            self.status.setText("Pause")
 
     def _resume(self):
-        if self.sender:
-            self.sender.resume(); self.status.setText("Gravure en cours…")
+        if self._machine_cmd(self.sender.resume if self.sender else None,
+                             "Reprendre"):
+            self.status.setText("Gravure en cours…")
 
     def _stop(self):
         """Arret du travail en cours, avec confirmation : la piece en cours sera

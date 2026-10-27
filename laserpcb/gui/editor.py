@@ -73,7 +73,7 @@ class ShapeItem(QGraphicsPathItem):
 
     def __init__(self, shape: dr.Shape, editor: "DrawingEditor",
                  path: QPainterPath, color: str, filled: bool,
-                 interactive: bool = True):
+                 interactive: bool = True, movable: bool | None = None):
         super().__init__(path)
         # ATTENTION : surtout pas ``self.shape`` — ``shape()`` est une methode
         # VIRTUELLE de QGraphicsItem. L'ecraser par une dataclass fait renvoyer
@@ -81,10 +81,12 @@ class ShapeItem(QGraphicsPathItem):
         # immediate, sans exception Python.
         self.model = shape
         self._editor = editor
+        if movable is None:
+            movable = interactive
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, interactive)
-        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, interactive)
-        if not interactive:
-            self.setOpacity(0.45)        # plateau voisin : visible, pas saisissable
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, movable)
+        if not movable:
+            self.setOpacity(0.45)        # plateau voisin : visible, pas encore actif
         pen = QPen(QColor(color))
         pen.setWidthF(1.6)
         pen.setCosmetic(True)
@@ -558,20 +560,30 @@ class DrawingEditor(QObject):
 
     # ---- plateaux ---------------------------------------------------------- #
     def plate_count(self) -> int:
+        """Nombre de plateaux, plateau actif VIDE compris (cf. Session)."""
+        s = self._get_session()
+        compte = getattr(s, "plate_count", None)
+        if callable(compte):
+            return compte()
         from .. import arrange as ar
-        return ar.plate_count(self.project.shapes)
+        return max(ar.plate_count(self.project.shapes), self.active_plate() + 1)
 
     def active_plate(self) -> int:
         return int(getattr(self._get_session(), "active_plate", 0))
 
-    def set_plate(self, index: int) -> None:
-        """Change de plateau : un plateau = un job a graver."""
+    def set_plate(self, index: int, garder_selection: bool = False) -> None:
+        """Change de plateau : un plateau = un job a graver.
+
+        ``garder_selection`` sert quand c'est un CLIC SUR UNE PIECE qui fait
+        basculer de plateau : effacer la selection annulerait le geste.
+        """
         n = self.plate_count()
         index = max(0, min(index, n - 1))
         s = self._get_session()
         if index != getattr(s, "active_plate", 0):
             s.active_plate = index
-            self._sel_ids = set()
+            if not garder_selection:
+                self._sel_ids = set()
             self._refresh()
             self.plates_changed.emit()
 
@@ -617,7 +629,8 @@ class DrawingEditor(QObject):
         return res
 
     # ---- generateur de boites ------------------------------------------------ #
-    def insert_box(self, pieces: list, thickness: float) -> dict:
+    def insert_box(self, pieces: list, thickness: float,
+                   profil: dict | None = None) -> dict:
         """Pose les panneaux d'un meuble, calques reglés depuis l'EPAISSEUR.
 
         Deux calques dédiés sont créés ou mis à jour : la découpe (passes et
@@ -629,7 +642,7 @@ class DrawingEditor(QObject):
             return {"pieces": 0, "shapes": 0, "plates": 0}
 
         coupe = self._ensure_layer("Découpe bois", "#c0392b",
-                                   bg.cut_profile(thickness))
+                                   profil or bg.cut_profile(thickness))
         decor = self._ensure_layer("Décor (gravure)", "#2b6cb0",
                                    bg.engrave_profile(thickness))
         shapes = bg.to_shapes(pieces, layer_cut=coupe.id, layer_decor=decor.id,
@@ -702,6 +715,72 @@ class DrawingEditor(QObject):
         self._begin()
         self.project.shapes[:] = [s for s in self.project.shapes if s.id not in ids]
         self._commit("Supprimer")
+
+    # ---- copier / coller ------------------------------------------------------ #
+    _CLE = "laserpcb_shapes"
+
+    def copy_selection(self) -> int:
+        """Copie la sélection. Renvoie le nombre d'objets copiés.
+
+        Le presse-papiers SYSTÈME reçoit la même chose en JSON : on peut ainsi
+        passer des pièces d'un projet à l'autre, ou d'une fenêtre à l'autre.
+        """
+        sel = self.selected_shapes()
+        if not sel:
+            return 0
+        self._clip = [sh.to_dict() for sh in sel]
+        try:
+            import json
+
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(
+                json.dumps({self._CLE: self._clip}, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            pass            # un presse-papiers indisponible ne doit rien casser
+        return len(sel)
+
+    def cut_selection(self) -> int:
+        n = self.copy_selection()
+        if n:
+            self.delete_selection()
+        return n
+
+    def _clip_content(self) -> list:
+        """Contenu à coller : le presse-papiers système prime s'il est à nous."""
+        try:
+            import json
+
+            from PySide6.QtWidgets import QApplication
+            texte = QApplication.clipboard().text()
+            if texte and self._CLE in texte:
+                d = json.loads(texte)
+                if isinstance(d.get(self._CLE), list):
+                    return d[self._CLE]
+        except Exception:  # noqa: BLE001
+            pass
+        return list(getattr(self, "_clip", []) or [])
+
+    def paste(self, dx: float = 6.0, dy: float = -6.0) -> int:
+        """Colle sur le plateau COURANT, légèrement décalé.
+
+        Décalé pour rester saisissable : collé pile sur l'original, on ne
+        saurait plus lequel on manipule.
+        """
+        dicts = self._clip_content()
+        if not dicts:
+            return 0
+        self._begin()
+        copies = []
+        for d in dicts:
+            sh = dr.Shape.from_dict(d)
+            sh.id = dr.new_id("o", self.project.shapes + copies)
+            sh.plate = self.active_plate()
+            dr.translate_shape(sh, dx, dy)
+            copies.append(sh)
+        self.project.shapes.extend(copies)
+        self._sel_ids = {c.id for c in copies}
+        self._commit(f"Coller {len(copies)} objet(s)")
+        return len(copies)
 
     def duplicate_selection(self, dx: float = 2.0, dy: float = -2.0) -> None:
         """Copie la sélection, légèrement décalée pour rester saisissable."""
@@ -800,9 +879,19 @@ class DrawingEditor(QObject):
 
         La scène est reconstruite à chaque rendu : sans cela, toucher une
         poignée ferait perdre la sélection qu'on est en train de manipuler.
+
+        Si le clic porte sur un AUTRE plateau, on s'y installe. Cliquer une
+        pièce doit suffire — aller d'abord la chercher dans le sélecteur du
+        haut était une corvée.
         """
-        self._sel_ids = {i.model.id for i in self.canvas.scene().selectedItems()
-                         if isinstance(i, ShapeItem)}
+        items = [i for i in self.canvas.scene().selectedItems()
+                 if isinstance(i, ShapeItem)]
+        self._sel_ids = {i.model.id for i in items}
+        plateaux = {int(getattr(i.model, "plate", 0)) for i in items}
+        if len(plateaux) == 1:
+            cible = plateaux.pop()
+            if cible != self.active_plate():
+                self.set_plate(cible, garder_selection=True)
 
     def select_all(self) -> None:
         for i in self.canvas.scene().items():
@@ -920,6 +1009,10 @@ class DrawingEditor(QObject):
             act.triggered.connect(
                 lambda _=False, i=lay.id: self.assign_layer(i))
         menu.addSeparator()
+        menu.addAction("Copier", self.copy_selection)
+        menu.addAction("Couper", self.cut_selection)
+        menu.addAction("Coller", self.paste)
+        menu.addSeparator()
         menu.addAction("Dupliquer", self.duplicate_selection)
         menu.addAction("Centrer", self.center_selection_on_board)
         menu.addSeparator()
@@ -942,6 +1035,15 @@ class DrawingEditor(QObject):
             return True
         if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._poly:
             self.finish_polyline()
+            return True
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection()
+            return True
+        if event.matches(QKeySequence.StandardKey.Cut):
+            self.cut_selection()
+            return True
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self.paste()
             return True
         if event.matches(QKeySequence.StandardKey.SelectAll):
             self.select_all()

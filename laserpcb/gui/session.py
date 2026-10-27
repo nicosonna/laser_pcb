@@ -930,9 +930,15 @@ class Session:
         return next((c for c in self.work_layers() if c.id == layer_id), None)
 
     def plate_count(self) -> int:
-        """Nombre de plateaux du dessin (toujours au moins un)."""
+        """Nombre de plateaux du dessin (toujours au moins un).
+
+        Le plateau ACTIF compte même s'il est vide. Sans cela, « + Plateau »
+        ne produisait rien de visible : un plateau n'existait que par les
+        pièces qu'il portait, donc un plateau neuf n'existait pas.
+        """
         from .. import arrange as ar
-        return ar.plate_count(self.project.shapes)
+        return max(ar.plate_count(self.project.shapes),
+                   int(getattr(self, "active_plate", 0)) + 1)
 
     def plate_shapes(self, plate: int | None = None) -> list:
         """Formes d'UN plateau. Un plateau = un job : la gravure, l'aperçu et

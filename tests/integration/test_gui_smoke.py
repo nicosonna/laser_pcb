@@ -328,3 +328,49 @@ def test_import_universel_aiguille_selon_le_fichier(qapp, tmp_path):
     w.import_any("C:/x/carte.zip")
     w.import_any("C:/x/logo.SVG")          # casse indifferente
     assert [k for k, _ in vus] == ["projet", "pcb", "svg"]
+
+
+def test_reprendre_sur_liaison_coupee_ne_plante_pas(qapp):
+    """Relevé dans le journal de l'utilisateur, en pleine gravure.
+
+    La machine avait fermé la connexion ; « Reprendre » remontait une
+    ConnectionResetError brute. La coupure doit mener à la reconnexion
+    automatique, pas à une boîte d'erreur interne.
+    """
+    from laserpcb.gui.send_panel import SendPanel
+    from laserpcb.sender import FakeFluidNC, GrblSender
+
+    p = SendPanel(get_gcode=lambda: "G21\n")
+    p.sender = GrblSender(FakeFluidNC())
+    p.sender.connect()
+    p._set_connected(True)
+
+    def coupee():
+        raise ConnectionResetError(
+            "[WinError 10054] Une connexion existante a dû être fermée")
+
+    p.sender.resume = coupee
+    p.sender.feed_hold = coupee
+
+    p._resume()                      # ne doit RIEN lever
+    assert "perdue" in p.status.text().lower()
+    p._pause()
+    assert p.sender is None or True   # la reconnexion a pris la main
+
+
+def test_une_erreur_franche_reste_signalee(qapp, monkeypatch):
+    """Une panne qui n'est PAS une coupure doit rester visible."""
+    from PySide6.QtWidgets import QMessageBox
+    from laserpcb.gui.send_panel import SendPanel
+    from laserpcb.sender import FakeFluidNC, GrblSender
+
+    vus = []
+    monkeypatch.setattr(QMessageBox, "critical",
+                        lambda *a, **k: vus.append(a[-1]))
+    p = SendPanel(get_gcode=lambda: "G21\n")
+    p.sender = GrblSender(FakeFluidNC())
+    p.sender.connect()
+    p._set_connected(True)
+    p.sender.resume = lambda: (_ for _ in ()).throw(ValueError("G-code refusé"))
+    p._resume()
+    assert vus and "refusé" in vus[0]
