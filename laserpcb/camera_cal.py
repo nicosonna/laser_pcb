@@ -34,7 +34,7 @@ reference, et chaque pixel y est ramene avant calcul.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 # Garde-fous : en dehors, ce n'est pas une calibration mais une erreur de
 # pointe. 0,002 mm/px serait un microscope, 2 mm/px une camera a 2 m du
@@ -87,6 +87,23 @@ class PixelMm:
         u = self.u0 + (self.d * dx - self.b * dy) / det
         v = self.v0 + (-self.c * dx + self.a * dy) / det
         return self._from_ref(u, v, img_w, img_h)
+
+    def with_spot(self, u: float, v: float,
+                  img_w: int | None = None, img_h: int | None = None) -> "PixelMm":
+        """Meme matrice, nouveau point de tir.
+
+        Les deux inconnues de la calibration ne vieillissent pas au meme
+        rythme. La matrice tient a l'optique et a l'angle de la camera sur son
+        support ; le point de tir, lui, tient a sa POSITION par rapport a la
+        buse — et c'est cela qu'un coup de coude, un demontage de lentille ou
+        une vis reprise deplacent. Le refaire coute un clic, contre quatre
+        pointes et deux deplacements de tete pour tout reprendre.
+
+        La taille d'image est ramenee a celle de la mesure d'origine : etalonner
+        en XGA une calibration prise en SVGA doit rester juste.
+        """
+        u, v = self._to_ref(u, v, img_w, img_h)
+        return replace(self, u0=u, v0=v)
 
     def _to_ref(self, u, v, img_w, img_h) -> tuple:
         if img_w and img_h and (img_w != self.ref_w or img_h != self.ref_h):

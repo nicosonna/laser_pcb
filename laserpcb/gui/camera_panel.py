@@ -193,7 +193,7 @@ class CameraView(QWidget):
 class SendPanelMachine:
     """Pont vers la graveuse, vu depuis le panneau camera.
 
-    Le panneau camera ne connait de la machine que ces quatre gestes. C'est
+    Le panneau camera ne connait de la machine que ces quelques gestes. C'est
     volontaire : une interface aussi etroite se remplace par un faux en test,
     et elle evite au panneau de dependre du sender et de ses etats.
     """
@@ -218,6 +218,19 @@ class SendPanelMachine:
         allume et peut l'eteindre.
         """
         self.panel.btn_pointer.setChecked(on)
+
+    def jig_offset(self) -> tuple:
+        return self.panel.jig_offset()
+
+    def set_jig_offset(self, dx: float, dy: float) -> None:
+        """Ecrit l'offset du gabarit dans l'onglet Envoi.
+
+        On passe par les CHAMPS et non par les reglages : l'onglet Envoi
+        memorise lui-meme a chaque changement, la valeur reste visible la ou
+        l'utilisateur la cherche, et il peut la corriger a la main juste apres.
+        """
+        self.panel.jig_x.setValue(float(dx))
+        self.panel.jig_y.setValue(float(dy))
 
 
 class CameraPanel(QWidget):
@@ -245,6 +258,10 @@ class CameraPanel(QWidget):
         self.client: CameraClient | None = None
         self.worker: _StreamWorker | None = None
         self._scan: _ScanWorker | None = None
+        # Detection au premier affichage : une seule fois par session, et elle
+        # enchaine sur la connexion (voir showEvent).
+        self._auto_fait = False
+        self._auto_suite = False
         self._locked = False
         self._last: bytes | None = None
         # Pont vers la graveuse, pose apres coup par la fenetre : le panneau
@@ -253,6 +270,9 @@ class CameraPanel(QWidget):
         self.cal: PixelMm | None = None
         self._target: tuple | None = None
         self._cal_step = 0
+        # Etalonnage du point de tir seul : un mode a part, car il ne bouge pas
+        # la tete et ne touche pas a la matrice (voir PixelMm.with_spot).
+        self._spot_mode = False
         self._cal_obs: list = []
         self._cal_spot: tuple | None = None
         self._cal_moved = (0.0, 0.0)
@@ -361,9 +381,29 @@ class CameraPanel(QWidget):
         al.addWidget(QLabel("Pas"), 0, 1)
         al.addWidget(self.cal_step, 0, 2)
 
+        # Deux etalonnages courts, pour ne pas reprendre les quatre pointes a
+        # chaque fois qu'un reglage a bouge.
+        self.btn_spot = QPushButton("Point de tir…")
+        self.btn_spot.setToolTip(
+            "Un seul clic : repointer l'endroit où le laser brûle dans "
+            "l'image, en gardant l'échelle déjà mesurée. C'est ce qu'il faut "
+            "refaire quand la caméra a pris un coup ou qu'on a touché à son "
+            "support. Si la lentille a tourné, reprenez « Calibrer… ».")
+        self.btn_spot.clicked.connect(self._spot_toggle)
+        self.btn_jig = QPushButton("Offset gabarit…")
+        self.btn_jig.setToolTip(
+            "Mesure à la caméra l'erreur du repère de gabarit, et l'ajoute à "
+            "l'offset de l'onglet Envoi. Envoyez la tête au repère de la "
+            "pièce, cliquez le repère du gabarit dans l'image, puis ce "
+            "bouton. La correction s'ajoute : une seconde mesure doit donner "
+            "un écart nul.")
+        self.btn_jig.clicked.connect(self._jig_measure)
+        al.addWidget(self.btn_spot, 1, 0)
+        al.addWidget(self.btn_jig, 1, 1, 1, 2)
+
         self.lbl_cal = QLabel()
         self.lbl_cal.setWordWrap(True)
-        al.addWidget(self.lbl_cal, 1, 0, 1, 3)
+        al.addWidget(self.lbl_cal, 2, 0, 1, 3)
 
         self.btn_goto = QPushButton("Aller au point")
         self.btn_goto.setToolTip("Amène la tête sur le point cliqué.")
@@ -372,12 +412,12 @@ class CameraPanel(QWidget):
         self.btn_zero.setToolTip("Amène la tête sur le point cliqué, puis y "
                                  "place l'origine de travail 0,0.")
         self.btn_zero.clicked.connect(lambda: self._move_to_target(True))
-        al.addWidget(self.btn_goto, 2, 0)
-        al.addWidget(self.btn_zero, 2, 1, 1, 2)
+        al.addWidget(self.btn_goto, 3, 0)
+        al.addWidget(self.btn_zero, 3, 1, 1, 2)
 
         self.lbl_target = QLabel()
         self.lbl_target.setWordWrap(True)
-        al.addWidget(self.lbl_target, 3, 0, 1, 3)
+        al.addWidget(self.lbl_target, 4, 0, 1, 3)
         root.addWidget(align)
 
         # Un clic ne bouge JAMAIS la machine tout seul : il pose une cible, et
@@ -426,6 +466,17 @@ class CameraPanel(QWidget):
         self.btn_cal.setEnabled(bool(self._cal_step) or
                                 (self.client is not None and not self._locked))
         self.cal_step.setEnabled(self._cal_step == 0 and not self._locked)
+        # Le point de tir se rejoue sur une calibration existante : sans elle
+        # il n'y a pas de matrice a conserver, et c'est « Calibrer… » qu'il
+        # faut. Pendant le mode, le bouton sert a annuler.
+        self.btn_spot.setEnabled(
+            self._spot_mode or
+            (self.cal is not None and self.client is not None
+             and self._cal_step == 0 and not self._locked))
+        # L'offset du gabarit se mesure sur un point visé : il lui faut donc
+        # une cible ET une calibration pour la convertir en millimetres.
+        self.btn_jig.setEnabled(aimed and self.cal is not None
+                                and not self._spot_mode)
 
     def set_machine(self, machine) -> None:
         """Branche la graveuse. Sans elle, le panneau sert quand meme a voir,
@@ -450,6 +501,11 @@ class CameraPanel(QWidget):
                 # gravure n'efface pas l'annulation.
                 self._cal_cancel("Gravure en cours : flux coupé et calibration "
                                  "interrompue (le G-code a besoin du réseau).")
+            if self._spot_mode:
+                # Pas de deplacement ici, mais un pointeur allume et plus
+                # d'image pour viser : le mode n'a plus de sens.
+                self._spot_cancel("Gravure en cours : flux coupé et étalonnage "
+                                  "du point de tir interrompu.")
         self._set_connected(self.client is not None)
 
     def shutdown(self) -> None:
@@ -466,6 +522,23 @@ class CameraPanel(QWidget):
                 th.wait(2000)
 
     # ---- détection --------------------------------------------------------- #
+    def showEvent(self, ev) -> None:
+        """Premier affichage : on cherche la carte sans attendre un clic.
+
+        Ouvrir le panneau, c'est vouloir s'en servir. La detection ne partait
+        que sur « Détecter » : un bouton de plus a trouver pour arriver a ce
+        que le panneau sait faire tout seul, et rien a l'ecran pour dire que la
+        camera etait la. Elle ne part qu'UNE fois par session — revenir sur
+        l'onglet ne doit ni relancer un scan, ni rebrancher une camera qu'on
+        vient justement de debrancher.
+        """
+        super().showEvent(ev)
+        if self._auto_fait or self._locked or self.client is not None:
+            return
+        self._auto_fait = True
+        self._auto_suite = True
+        self.scan()
+
     def scan(self) -> None:
         self.status.setText("Recherche de la caméra…")
         self.btn_scan.setEnabled(False)
@@ -478,6 +551,10 @@ class CameraPanel(QWidget):
         retire(self._scan)
         self._scan = None
         self.btn_scan.setEnabled(not self._locked)
+        # La suite automatique ne vaut que pour CE scan : un clic sur
+        # « Détecter » ensuite ne doit pas connecter dans le dos de celui qui
+        # cherchait justement a choisir.
+        suite, self._auto_suite = self._auto_suite, False
         if not cams:
             # Le cas le plus courant d'une camera introuvable : elle n'a pas
             # reussi a joindre le WiFi et attend sur son propre reseau.
@@ -488,6 +565,11 @@ class CameraPanel(QWidget):
             return
         self.host.setText(cams[0].ip)
         self.status.setText(f"Trouvée : {cams[0].label()}")
+        # Une seule carte, et c'est nous qui avons lance la recherche : on
+        # enchaine sur la connexion. A deux cartes on s'arrete la — c'est a
+        # l'utilisateur de dire laquelle regarde sa piece.
+        if suite and len(cams) == 1 and not self._locked and self.client is None:
+            self.toggle_connect()
 
     # ---- connexion --------------------------------------------------------- #
     def toggle_connect(self) -> None:
@@ -547,6 +629,9 @@ class CameraPanel(QWidget):
             # Sans image, plus rien a pointer : et l'assistant laisserait le
             # pointeur allume sur la machine.
             self._cal_cancel("Calibration abandonnée (caméra déconnectée).")
+        if self._spot_mode:
+            self._spot_cancel("Étalonnage du point de tir abandonné "
+                              "(caméra déconnectée).")
         self._target = None
         self.view.set_marker(None)
         if self.client and self.btn_laser.isChecked():
@@ -652,9 +737,12 @@ class CameraPanel(QWidget):
 
     # ---- viser un point ---------------------------------------------------- #
     def _on_click(self, u: float, v: float) -> None:
-        """Clic dans l'image : un pointe de l'assistant, ou une cible."""
+        """Clic dans l'image : un pointe d'etalonnage, ou une cible."""
         if self._cal_step:
             self._cal_click(u, v)
+            return
+        if self._spot_mode:
+            self._spot_click(u, v)
             return
         self._target = (u, v)
         self.view.set_marker(self._target)
@@ -845,19 +933,148 @@ class CameraPanel(QWidget):
         self._target = None
         self.cal = cal
         self._store_cal()
-        # Le reticule DECOULE de la calibration : la croix se pose d'elle-meme
-        # sur le point de tir, et les deux champs « Réticule » cessent d'etre
-        # un reglage a tatons.
-        for w, val in ((self.cross_x, cal.cross_offset()[0]),
-                       (self.cross_y, cal.cross_offset()[1])):
-            w.blockSignals(True)
-            w.setValue(int(round(val)))
-            w.blockSignals(False)
-        self._on_cross()
+        self._poser_le_reticule()
         doutes = warnings_for(cal)
         self.status.setText("Calibrée — " + cal.summary() +
                             ("    ⚠ " + " ; ".join(doutes) if doutes else ""))
         self._refresh_cal_label()
+        self._refresh_target()
+
+    def _poser_le_reticule(self) -> None:
+        """Pose la croix sur le point de tir mesure.
+
+        Le reticule DECOULE de la calibration : les deux champs « Réticule »
+        cessent d'etre un reglage a tatons. Les signaux sont bloques pour ne
+        pas repasser par ``_on_cross`` deux fois — on l'appelle une seule fois
+        a la fin, une fois les deux champs coherents.
+        """
+        if self.cal is None:
+            return
+        for w, val in ((self.cross_x, self.cal.cross_offset()[0]),
+                       (self.cross_y, self.cal.cross_offset()[1])):
+            w.blockSignals(True)
+            w.setValue(int(round(val)))
+            w.blockSignals(False)
+        self._on_cross()
+
+    # ---- étalonnage du point de tir ---------------------------------------- #
+    def _spot_toggle(self) -> None:
+        if self._spot_mode:
+            self._spot_cancel("Étalonnage du point de tir annulé.")
+            return
+        self._spot_start()
+
+    def _spot_start(self) -> None:
+        """Un clic pour replacer le point de tir, l'echelle restant acquise."""
+        if self.cal is None:
+            self.status.setText(
+                "Rien à conserver : passez par « Calibrer… » une première "
+                "fois, l'étalonnage du point de tir reprendra son échelle.")
+            return
+        if self._image_size() is None:
+            self.status.setText("Aucune image : connectez la caméra d'abord.")
+            return
+        self._spot_mode = True
+        self.btn_spot.setText("Annuler")
+        # Le pointeur rend le point de tir VISIBLE ; sans graveuse branchee on
+        # peut encore cliquer une marque deja brulee, donc on n'exige rien.
+        allume = False
+        if self.machine is not None and self.machine.ready():
+            try:
+                self.machine.pointer(True)
+                allume = True
+            except Exception as e:  # noqa: BLE001
+                self._spot_cancel(f"Pointeur refusé : {e}")
+                return
+        self.status.setText(
+            ("Pointeur allumé : cliquez le point lumineux. L'échelle déjà "
+             "mesurée est conservée.") if allume else
+            ("Cliquez l'endroit où le laser brûle — une marque déjà faite, "
+             "faute de graveuse pour allumer le pointeur."))
+        self._refresh_buttons()
+
+    def _spot_click(self, u: float, v: float) -> None:
+        self.view.set_marker((u, v))
+        size = self._image_size()
+        if size is None:
+            self._spot_cancel("Image perdue : étalonnage à refaire.")
+            return
+        cal = self.cal.with_spot(u, v, *size)
+        avant = self.cal.cross_offset()
+        self._spot_end()
+        self.cal = cal
+        self._store_cal()
+        self._poser_le_reticule()
+        # La cible visee se lisait depuis l'ANCIEN point de tir : la garder
+        # afficherait un ecart en mm qui ne veut plus rien dire.
+        self._target = None
+        self.view.set_marker(None)
+        apres = cal.cross_offset()
+        self.status.setText(
+            f"Point de tir étalonné : réticule déplacé de "
+            f"{apres[0] - avant[0]:+.0f} / {apres[1] - avant[1]:+.0f} px. "
+            f"Échelle inchangée — {cal.summary()}")
+        self._refresh_cal_label()
+        self._refresh_target()
+
+    def _spot_end(self) -> None:
+        self._spot_mode = False
+        self.btn_spot.setText("Point de tir…")
+        if self.machine is not None:
+            try:
+                self.machine.pointer(False)
+            except Exception:  # noqa: BLE001
+                pass           # le point est releve : ne pas tout perdre ici
+
+    def _spot_cancel(self, msg: str) -> None:
+        self._spot_end()
+        self.view.set_marker(None)
+        self.status.setText(msg)
+        self._refresh_buttons()
+
+    # ---- étalonnage de l'offset du gabarit --------------------------------- #
+    def _jig_measure(self) -> None:
+        """Corrige l'offset du gabarit d'apres ce que voit la camera.
+
+        La correction s'AJOUTE a l'offset courant au lieu de le remplacer, et
+        c'est ce qui la rend sure : on n'a pas a deviner dans quel sens compte
+        la convention de l'onglet Envoi. La tete est allee au repere avec
+        l'offset actuel ; ce que la camera voit encore d'ecart EST l'erreur
+        restante. Une seconde mesure doit donner zero — si elle double, le
+        signe est faux et cela se voit du premier coup.
+        """
+        off = self._target_mm()
+        if off is None:
+            self.status.setText(
+                "Cliquez d'abord le repère du gabarit dans l'image, caméra "
+                "calibrée : sans échelle, un clic ne vaut aucun millimètre.")
+            return
+        if self.machine is None or not hasattr(self.machine, "jig_offset"):
+            self.status.setText("Connectez la graveuse : l'offset du gabarit "
+                                "vit dans l'onglet Envoi.")
+            return
+        jx, jy = self.machine.jig_offset()
+        nx, ny = jx + off[0], jy + off[1]
+        rep = QMessageBox.question(
+            self, "Étalonner l'offset du gabarit",
+            f"À faire AVANT de valider : envoyer la tête au repère de la pièce "
+            f"(« Aller à la pièce », onglet Envoi), et avoir cliqué le repère "
+            f"du gabarit dans l'image.\n\n"
+            f"Écart vu par la caméra : X {off[0]:+.2f} / Y {off[1]:+.2f} mm.\n"
+            f"Offset du gabarit : X {jx:+.2f} / Y {jy:+.2f}  →  "
+            f"X {nx:+.2f} / Y {ny:+.2f} mm.\n\n"
+            f"La correction s'ajoute à l'offset actuel : refaire la mesure "
+            f"ensuite doit donner un écart proche de zéro. Appliquer ?")
+        if rep != QMessageBox.Yes:
+            self.status.setText("Offset du gabarit inchangé.")
+            return
+        self.machine.set_jig_offset(nx, ny)
+        self._target = None
+        self.view.set_marker(None)
+        self.status.setText(
+            f"Offset du gabarit : X {nx:+.2f} / Y {ny:+.2f} mm "
+            f"(corrigé de {off[0]:+.2f} / {off[1]:+.2f}). Renvoyez la tête au "
+            f"repère et remesurez : l'écart doit être nul.")
         self._refresh_target()
 
     def _refresh_cal_label(self) -> None:

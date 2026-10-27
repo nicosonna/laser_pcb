@@ -240,3 +240,70 @@ def test_une_calibration_memorisee_absurde_est_refusee():
     raw["a"] = raw["d"] = 50.0                 # 50 mm/px
     with pytest.raises(CalibrationError, match="Échelle invraisemblable"):
         PixelMm.from_dict(raw)
+
+
+# --------------------------------------------------------------------------- #
+# Etalonnage du point de tir seul
+# --------------------------------------------------------------------------- #
+def test_le_point_de_tir_se_rejoue_sans_toucher_a_lechelle():
+    """L'interet du mode : garder la mesure couteuse, refaire la gratuite.
+
+    La matrice demande deux deplacements de tete et trois pointes ; le point
+    de tir, un clic. C'est pourtant lui qui bouge quand la camera prend un
+    coup, puisqu'il ne tient qu'a sa position par rapport a la buse.
+    """
+    cal = _vraie(mm_px=0.0975, angle=-2.5)
+    rejoue = cal.with_spot(433.0, 288.0)
+    assert (rejoue.u0, rejoue.v0) == (433.0, 288.0)
+    assert (rejoue.a, rejoue.b, rejoue.c, rejoue.d) == (cal.a, cal.b, cal.c, cal.d)
+    assert (rejoue.ref_w, rejoue.ref_h) == (cal.ref_w, cal.ref_h)
+    assert rejoue.mm_per_px() == cal.mm_per_px()
+    assert rejoue.rotation_deg() == cal.rotation_deg()
+
+
+def test_le_reticule_suit_le_point_de_tir_rejoue():
+    """Le reticule DECOULE de la calibration : il doit bouger d'autant."""
+    cal = _vraie(u0=400.0, v0=300.0)
+    rejoue = cal.with_spot(412.0, 293.0)
+    avant, apres = cal.cross_offset(), rejoue.cross_offset()
+    assert (apres[0] - avant[0], apres[1] - avant[1]) == (12.0, -7.0)
+
+
+def test_le_nouveau_tir_est_a_zero_millimetre_de_lui_meme():
+    cal = _vraie(angle=3.0).with_spot(377.5, 321.0)
+    dx, dy = cal.offset_mm(377.5, 321.0)
+    assert (abs(dx), abs(dy)) == pytest.approx((0.0, 0.0), abs=1e-12)
+
+
+def test_rejouer_le_tir_ne_change_pas_les_ecarts_entre_deux_pixels():
+    """Deplacer le centre translate les mesures, il ne les deforme pas.
+
+    C'est ce qui autorise a ne refaire que le point de tir : l'echelle et
+    l'orientation vues entre deux details de la piece restent celles qui ont
+    ete mesurees.
+    """
+    cal = _vraie(mm_px=0.11, angle=-4.0)
+    rejoue = cal.with_spot(450.0, 260.0)
+    a1, b1 = cal.offset_mm(500.0, 400.0), cal.offset_mm(300.0, 350.0)
+    a2, b2 = rejoue.offset_mm(500.0, 400.0), rejoue.offset_mm(300.0, 350.0)
+    assert (a1[0] - b1[0], a1[1] - b1[1]) == pytest.approx(
+        (a2[0] - b2[0], a2[1] - b2[1]))
+
+
+def test_le_tir_rejoue_dans_une_autre_taille_dimage_est_ramene_a_la_reference():
+    """Piege de la calibration : les pixels dependent du ``framesize``.
+
+    Etalonner le point de tir en XGA une calibration prise en SVGA doit rester
+    juste, sinon le reticule saute d'un quart d'image sans rien dire.
+    """
+    cal = _vraie(w=800, h=600)
+    rejoue = cal.with_spot(512.0, 384.0, 1024, 768)
+    assert (rejoue.u0, rejoue.v0) == pytest.approx((400.0, 300.0))
+    # Et le pixel pointe doit bien valoir zero millimetre, dans SA taille.
+    dx, dy = rejoue.offset_mm(512.0, 384.0, 1024, 768)
+    assert (dx, dy) == pytest.approx((0.0, 0.0))
+
+
+def test_un_tir_rejoue_reste_relisable():
+    cal = _vraie(angle=1.5).with_spot(401.25, 302.75)
+    assert PixelMm.from_dict(cal.to_dict()) == cal
